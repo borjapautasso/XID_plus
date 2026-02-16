@@ -8,8 +8,6 @@ import numpy as np
 
 
 import warnings
-from matplotlib.cbook import MatplotlibDeprecationWarning
-warnings.simplefilter('ignore', MatplotlibDeprecationWarning)
 warnings.simplefilter('ignore', UserWarning)
 warnings.simplefilter('ignore', RuntimeWarning)
 warnings.simplefilter('ignore',UnicodeWarning)
@@ -48,7 +46,7 @@ def display_animation(anim):
     return HTML(anim_to_html(anim))
 
 
-def plot_map(priors):
+def plot_map(priors, show_cmap = True):
 
     """Plot of the fitted maps, with fitted objects overplotted
 
@@ -67,9 +65,12 @@ def plot_map(priors):
     for i in range(0,len(priors)):
         vmin=np.min(priors[i].sim)
         vmax=np.max(priors[i].sim)
-        figs[i].show_colorscale(vmin=vmin,vmax=vmax,cmap=cmap)
-        figs[i].show_markers(priors[i].sra, priors[i].sdec, edgecolor='black', facecolor='black',
-                marker='o', s=20, alpha=0.5)
+        if show_cmap:
+            figs[i].show_colorscale(vmin=vmin,vmax=vmax,cmap=cmap)
+        else:
+            figs[i].show_colorscale(vmin=vmin,vmax=vmax)
+        figs[i].show_markers(priors[i].sra, priors[i].sdec, facecolor="#d81b60",
+                marker='x', s=10)
         figs[i].tick_labels.set_xformat('dd.dd')
         figs[i].tick_labels.set_yformat('dd.dd')
         figs[i].add_colorbar()
@@ -139,8 +140,8 @@ def plot_Bayes_pval_map(priors, posterior):
         Bayes_pvals.append(postmaps.make_Bayesian_pval_maps(priors[i], mod_map_array[i]))
 
     for i in range(0, len(priors)):
-        figs[i].show_markers(priors[i].sra, priors[i].sdec, edgecolor='black', facecolor='black',
-                             marker='o', s=20, alpha=0.5)
+        figs[i].show_markers(priors[i].sra, priors[i].sdec, facecolor='black',
+                             marker='x', s=10)
         figs[i].tick_labels.set_xformat('dd.dd')
         figs[i].tick_labels.set_yformat('dd.dd')
         figs[i]._data[

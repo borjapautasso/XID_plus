@@ -56,6 +56,39 @@ def get_fitting_region(order,pixel):
     moc_tile.add(order+2,np.unique(pixelfunc.get_all_neighbours(new_nside, pixels,nest=True)))
     return moc_tile
 
+def get_fitting_region_noexpand(order,pixel, expand_order = 2):
+    """Expand tile by quarter of a pixel for fitting
+
+    
+    :param order: the HEALPix resolution level
+    :param pixel: given HEALPix pixel that needs to be fit
+    :return: HEALPix pixels that need to be fit
+    """
+
+    old_nside = 2**order
+    new_order = order + expand_order
+    new_nside = 2**new_order
+    
+    # Get theta, phi center of original pixel
+    theta, phi = hp.pix2ang(old_nside, pixel, nest=True)
+    
+    # Find all subpixels of 'pixel' at new_nside inside this pixel
+    # Method: find all pixels at new_nside within pixel at old_nside by checking parents
+    
+    # The number of subpixels per original pixel is 4^expand_order
+    n_subpixels = 4**expand_order
+    
+    # Compute the first subpixel index
+    first_subpixel = pixel * n_subpixels
+    
+    # The subpixels that belong to this pixel are a contiguous block in NESTED ordering
+    subpixels = np.arange(first_subpixel, first_subpixel + n_subpixels)
+    
+    # Create MOC and add these subpixels at new_order
+    moc = MOC()
+    moc.add(new_order, subpixels)
+    
+    return moc
 
 def create_MOC_from_map(good,wcs):
     """Generate MOC from map

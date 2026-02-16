@@ -1,4 +1,6 @@
-*.pyc
-#*#
-*~
-__pycache__
+incomplete_priors/
+new_cirrus_modelling/
+SLURM_OUTPUTS/
+.xid/
+__pycache__/
+PRIMA_1A_1_coadd.fits
