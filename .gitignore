@@ -1,27 +1,9 @@
-__pycache__/
+*
 
-docs/
-stan_models/
-test_files/
-tests/
-.#paper_plots.py
-\#paper_plots.py\#
-Dockerfile
-License.md
-.gitignore
+!xidplus/
+!xidplus/**
 
-.xid/
-incomplete_priors/
-new_cirrus_modelling/
-SLURM_OUTPUTS/
-
-PRIMA_1A_1_coadd.
-artemistest.ipynb
-check_cirrus_subtraction.ipynb
-checking_incomplete_priors.ipynb
-comparing_cirrus_methods.ipynb
-run_model.py
-run_model.slurm
-run_prior.py
-run_prior.slurm
-test_xid_improvements.ipynb
+!xid_functions.py
+!req.txt
+!setup.py
+!.gitignore
