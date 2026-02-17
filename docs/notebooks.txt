@@ -1,1 +1,0 @@
-.. include:: ../notebooks/examples/XID+example_run_script.ipynb
