@@ -93,4 +93,4 @@ def hierarchical_tile_single(masterfile, tilefile, output_folder, catname, index
     outfile = output_folder / f"{catname}_Tile_{large_tile}_{order_large}.pkl"
     # outfile = f"prior_processing_output/{band}/{catname}_Tile_"+ str(large_tile) + '_' + str(order_large) + '.pkl'
     with open(outfile, 'wb') as f:
-        pickle.dump({'priors':priors, 'version':"jd_updates with my own things :p"}, f)
+        pickle.dump({'priors':priors, 'version':xidplus.io.git_version()}, f)

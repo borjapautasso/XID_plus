@@ -511,12 +511,12 @@ def xid_prior(
         # Master prior
         outfile_master = output_folder / f"{prior_name}_Master_prior.pkl"
         with open(outfile_master, "wb") as f:
-            pickle.dump({"priors": priors[i], "tiles": tiles, "order": order, "version": "jd_updates with my own things :p"}, f)
+            pickle.dump({"priors": priors[i], "tiles": tiles, "order": order, "version": xidplus.io.git_version()}, f)
 
         # Tiles
         outfile_tiles = output_folder / f"{prior_name}_Tiles.pkl"
         with open(outfile_tiles, "wb") as f:
-            pickle.dump({"tiles": tiles, "order": order, "tiles_large": tiles_large, "order_large": order_large, "version": "jd_updates with my own things :p"}, f)
+            pickle.dump({"tiles": tiles, "order": order, "tiles_large": tiles_large, "order_large": order_large, "version": xidplus.io.git_version()}, f)
 
         # Individual large tile
         HPC.hierarchical_tile_single(outfile_master, outfile_tiles, output_folder, prior_name, index_large_tile)
