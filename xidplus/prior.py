@@ -261,7 +261,7 @@ class prior(object):
 
         self.bkg = (mu, sigma)
 
-    def upper_lim_map(self):
+    def _upper_lim_map(self):
         """Update flux upper limit to abs(bkg)+2*sigma_bkg+max(D)
          where max(D) is maximum value of pixels the source contributes to"""
 
@@ -272,22 +272,23 @@ class prior(object):
                 self.prior_flux_upper[i] = np.max(self.sim[self.amat_row[ind]]) + (np.abs(self.bkg[0]) + 2 * self.bkg[1])
 
 
-    def upper_lim_map_cpu_improved(self):
+    def upper_lim_map(self):
         """Update flux upper limit to abs(bkg)+2*sigma_bkg+max(D)
          where max(D) is maximum value of pixels the source contributes to"""
 
         self.prior_flux_upper = np.full(self.nsrc, 1000.0)
 
+        # Calculate the background term once outside the loop
         bkg_term = np.abs(self.bkg[0]) + 2 * self.bkg[1]
 
         for i in range(self.nsrc):
             ind = self.amat_col == i
-            if ind.any():
+            if ind.any(): # Check .any() instead of boolean sum. .any() stops at first True
                 self.prior_flux_upper[i] = np.max(self.sim[self.amat_row[ind]]) + bkg_term
 
 
 
-    def get_pointing_matrix(self, bkg=True):
+    def _get_pointing_matrix(self, bkg=True):
         """Calculate pointing matrix. If bkg = True, bkg is fitted to all pixels. If False, bkg only fitted to where prior sources contribute
         """
         from scipy import interpolate
@@ -309,6 +310,9 @@ class prior(object):
             dy = -np.rint(self.sy[s]).astype(int) + self.pindy[centre2] + self.sy_pix
 
             # # diff from each pixel in prf
+            # Not using this right now, but isnt hte use of rint here a bit weird?
+            # Like it works since its consistent with dx and dy but its weird
+
             # pindx = self.pindx + self.sx[s] - np.rint(self.sx[s]).astype(int)
             # pindy = self.pindy + self.sy[s] - np.rint(self.sy[s]).astype(int)
             # ipx2, ipy2 = np.meshgrid(pindx, pindy)
@@ -333,6 +337,65 @@ class prior(object):
         self.amat_data = amat_data
         self.amat_row = amat_row
         self.amat_col = amat_col
+
+
+    def get_pointing_matrix(self):
+        """
+        Calculate pointing matrix.
+        """
+        from scipy.interpolate import RegularGridInterpolator
+
+        paxis1, paxis2 = self.prf.shape
+
+        # List + append rather than arrays + np.append(), much faster
+        # Even if the interpolation is easily the most time consuming part
+        amat_row = []
+        amat_col = []
+        amat_data = []
+
+        # ------Deal with PRF array----------
+        centre1 = np.rint((paxis1 - 1.) / 2).astype(int)
+        centre2 = np.rint((paxis2 - 1.) / 2).astype(int)
+        # create pointing array
+        for s in range(self.nsrc):
+
+            # diff from centre of beam for each pixel in x and y
+            dx = -np.rint(self.sx[s]).astype(int) + self.pindx[centre1] + self.sx_pix
+            dy = -np.rint(self.sy[s]).astype(int) + self.pindy[centre2] + self.sy_pix
+
+            # # diff from each pixel in prf
+            # pindx = self.pindx + self.sx[s] - np.rint(self.sx[s]).astype(int)
+            # pindy = self.pindy + self.sy[s] - np.rint(self.sy[s]).astype(int)
+            # ipx2, ipy2 = np.meshgrid(pindx, pindy)
+
+            # Since SIDES places sources in centre of pixel, use this instead
+            pindx = self.pindx
+            pindy = self.pindy
+
+            good = (dx >= 0) & (dx <= self.pindx[paxis1 - 1]) & (dy >= 0) & (dy <= self.pindy[paxis2 - 1])
+
+            # Switch to RegularGridInterpolator rather than griddata which uses triangulation.
+            # Much much faster, debatable which is 'better' if any.
+            # BTW it expects (y,x)
+            rgi = RegularGridInterpolator(
+                (pindy, pindx),
+                self.prf,
+                method='linear',
+                bounds_error=False,
+                fill_value=0.0
+            )
+
+            atemp = rgi(np.column_stack([dy[good], dx[good]]))
+
+            if atemp.size > 0:
+                keep=atemp > np.max(atemp)/1.0E3
+                amat_data.append(atemp[keep])
+                amat_row.append(np.arange(0, self.snpix, dtype=int)[good][keep])
+                amat_col.append(np.full(keep.sum(), s))
+
+        self.amat_data = np.concatenate(amat_data)
+        self.amat_row = np.concatenate(amat_row)
+        self.amat_col = np.concatenate(amat_col)
 
 
     # Other functions used. For e.g. parallelism, or running with gpu
