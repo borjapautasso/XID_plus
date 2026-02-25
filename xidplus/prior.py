@@ -1,8 +1,9 @@
 import numpy as np
-
+import torch
 from astropy import wcs
+from tqdm import tqdm
 from xidplus import moc_routines
-
+import jax
 
 # from scipy import interpolate
 # from joblib import Parallel, delayed
@@ -266,27 +267,33 @@ class prior(object):
          where max(D) is maximum value of pixels the source contributes to"""
 
         self.prior_flux_upper = np.full((self.nsrc), 1000.0)
-        for i in range(0, self.nsrc):
+        for i in tqdm(range(self.nsrc), desc = "Calculating upper maps"):
             ind = self.amat_col == i
             if ind.sum() > 0:
                 self.prior_flux_upper[i] = np.max(self.sim[self.amat_row[ind]]) + (np.abs(self.bkg[0]) + 2 * self.bkg[1])
 
-
     def upper_lim_map(self):
-        """Update flux upper limit to abs(bkg)+2*sigma_bkg+max(D)
-         where max(D) is maximum value of pixels the source contributes to"""
+        """
+        Update flux upper limit to abs(bkg)+2*sigma_bkg+max(D)
+        where max(D) is maximum value of pixels the source contributes to.
 
-        self.prior_flux_upper = np.full(self.nsrc, 1000.0)
+        Vectorised using np.maximum.at, which is O(amat_col).
+        """
 
-        # Calculate the background term once outside the loop
+        self.prior_flux_upper = np.full(self.nsrc, -np.inf)
+
         bkg_term = np.abs(self.bkg[0]) + 2 * self.bkg[1]
 
-        for i in range(self.nsrc):
-            ind = self.amat_col == i
-            if ind.any(): # Check .any() instead of boolean sum. .any() stops at first True
-                self.prior_flux_upper[i] = np.max(self.sim[self.amat_row[ind]]) + bkg_term
+        values = self.sim[self.amat_row]
 
+        # grouped max
+        np.maximum.at(self.prior_flux_upper, self.amat_col, values)
 
+        # remove -inf for empty sources
+        empty = ~np.isfinite(self.prior_flux_upper)
+        self.prior_flux_upper[empty] = 1000.0
+
+        self.prior_flux_upper[~empty] += bkg_term
 
     def _get_pointing_matrix(self, bkg=True):
         """Calculate pointing matrix. If bkg = True, bkg is fitted to all pixels. If False, bkg only fitted to where prior sources contribute
@@ -302,7 +309,7 @@ class prior(object):
         centre1 = np.rint((paxis1 - 1.) / 2).astype(int)
         centre2 = np.rint((paxis2 - 1.) / 2).astype(int)
         # create pointing array
-        for s in range(0, self.nsrc):
+        for s in tqdm(range(self.nsrc), desc = "Calculating pointing matrix"):
 
             # diff from centre of beam for each pixel in x
             dx = -np.rint(self.sx[s]).astype(int) + self.pindx[centre1] + self.sx_pix
@@ -338,10 +345,32 @@ class prior(object):
         self.amat_row = amat_row
         self.amat_col = amat_col
 
-
     def get_pointing_matrix(self):
         """
+        Detects whether GPU is present, and utilises it if so.
+        Otherwise uses CPU.
+        """
+
+        # Im not sure gpu is faster if tile is relatively small.
+        # Maybe should check order and take into accoutn, but need testing.
+
+        # Either way if tile is small doubt itll make much difference
+        try:
+            gpu_devices = jax.devices("gpu")
+            if gpu_devices:
+                print("GPU detected, running with GPU.")
+                self.get_pointing_matrix_GPU()
+        except RuntimeError:
+            print("GPU not detected, running with CPU.")
+            self.get_pointing_matrix_CPU()
+
+
+    def get_pointing_matrix_CPU(self):
+        """
         Calculate pointing matrix.
+
+        O(nsrc x snpix)? Since both scale equally with tile size O(n^2)?
+        Either way RGI is far far faster than the triangulation previously done.
         """
         from scipy.interpolate import RegularGridInterpolator
 
@@ -356,7 +385,11 @@ class prior(object):
         # ------Deal with PRF array----------
         centre1 = np.rint((paxis1 - 1.) / 2).astype(int)
         centre2 = np.rint((paxis2 - 1.) / 2).astype(int)
+
         # create pointing array
+
+        # TQDM does not work very well with SLURM output, might have to rethink
+        # for s in tqdm(range(self.nsrc), desc = "Calculating pointing matrix", miniters = self.nsrc//20):
         for s in range(self.nsrc):
 
             # diff from centre of beam for each pixel in x and y
@@ -397,212 +430,87 @@ class prior(object):
         self.amat_row = np.concatenate(amat_row)
         self.amat_col = np.concatenate(amat_col)
 
+    def get_pointing_matrix_GPU(self, batch_size=64, device='cuda'):
+        """
+        AI NEED TO CHECK THIS.
+        I mean it gives the right results and its fast af?
 
-    # Other functions used. For e.g. parallelism, or running with gpu
-    # Need to look into them though. Test + verify
+        GPU-accelerated version of get_pointing_matrix using PyTorch.
 
-    # They were also built on the old version with e.g. wrong pointing matrix for SIDES, so have to update those
-    # def upper_lim_map_per_source(self, i):
-    #     """Calculates the flux upper limit for an individual source."""
+        Produces amat_row, amat_col, amat_data identical to CPU version.
+        """
+        # Move pixel coordinates to GPU
+        sx_pix = torch.tensor(self.sx_pix, device=device, dtype=torch.float32)
+        sy_pix = torch.tensor(self.sy_pix, device=device, dtype=torch.float32)
+        snpix = sx_pix.shape[0]
 
-    #     ind = self.amat_col == i
-    #     if ind.sum() > 0:
-    #         # self.prior_flux_upper[i] = np.max(self.sim[self.amat_row[ind]]) + (np.abs(self.bkg[0]) + 2 * self.bkg[1])
-    #         return i,  np.max(self.sim[self.amat_row[ind]]) + (np.abs(self.bkg[0]) + 2 * self.bkg[1])
-        
-    # def upper_lim_per_batch(self, batch_sources):
-    #     """Calculates the upper limit of a batch of sources."""
-    #     indices = np.array([])
-    #     values = np.array([])
-    #     for s in batch_sources:
-    #         index, value = self.upper_lim_map_per_source(s)
-    #         indices = np.append(indices, index)
-    #         values = np.append(values, value)
-    #     return indices, values
+        # PRF and its pixel scales
+        prf = torch.tensor(self.prf, device=device, dtype=torch.float32)
+        pindx = torch.tensor(self.pindx, device=device, dtype=torch.float32)
+        pindy = torch.tensor(self.pindy, device=device, dtype=torch.float32)
 
-    # def upper_lim_map_parallel(self):
-    #     """Updates the flux upper limit of all sources in parallel. See upper_lim_map."""
-    #     self.prior_flux_upper = np.full((self.nsrc), 1000.0)
+        paxis1, paxis2 = prf.shape
+        centre1 = int(round((paxis1 - 1) / 2))
+        centre2 = int(round((paxis2 - 1) / 2))
 
-    #     # For low numbers of sources, it's not worth the overheads of parallelising 
-    #     batches = list(self.batcher(range(self.nsrc), 10000))
+        amat_row = []
+        amat_col = []
+        amat_data = []
 
-    #     results = Parallel(n_jobs=-1)(delayed(self.upper_lim_per_batch)(batch) for batch in batches)
-        
-
-    #     indices, values = zip(*results)
-
-    #     indices = np.concatenate(indices).ravel().astype(np.int64)
-    #     values = np.concatenate(values).ravel().astype(np.float64)
-
-    #     for index, value in zip(indices, values):
-    #         self.prior_flux_upper[index] = value
-
-    # # ---------------
-    
-    # # --- Build interpolator once outside ---
-    # @staticmethod
-    # def build_prf_interpolator(prf):
-    #     paxis1, paxis2 = prf.shape
-    #     px = jnp.arange(paxis1)
-    #     py = jnp.arange(paxis2)
-    #     interp = RegularGridInterpolator(
-    #         (px, py),
-    #         jnp.array(prf),
-    #         method='linear',
-    #         bounds_error=False,
-    #         fill_value=0.0
-    #     )
-    #     return interp
-
-    # # --- Top-level function to process a single source ---
-    # @staticmethod
-    # def process_single_source(interp, sx_val, sy_val, sx_pix, sy_pix, snpix, source_index):
-    #     paxis1, paxis2 = interp.grid[0].shape[0], interp.grid[1].shape[0]
-    #     dx = -jnp.rint(sx_val) + (paxis1-1)/2 + sx_pix
-    #     dy = -jnp.rint(sy_val) + (paxis2-1)/2 + sy_pix
-
-    #     coords = jnp.stack([dy, dx], axis=-1)
-    #     atemp = interp(coords)  # out-of-bounds points are 0
-
-    #     rows = jnp.arange(snpix)
-    #     cols = jnp.full(snpix, source_index)
-    #     data = atemp
-
-    #     return rows, cols, data
+        # Move source positions to GPU
+        sx = torch.tensor(self.sx, device=device, dtype=torch.float32)
+        sy = torch.tensor(self.sy, device=device, dtype=torch.float32)
 
 
-    # def get_pointing_matrix_jax(self, bkg=True, batch_size=15):
-    #     """
-    #     Build pointing matrix fully on GPU without pre-allocating huge arrays.
-    #     Handles 44k sources with large snpix.
-    #     """
-    #     interp = self.build_prf_interpolator(self.prf)
-    #     nsrc = self.sx.shape[0]
-    #     snpix = self.snpix
+        # TQDM does not work very well with SLURM output, might have to rethink
+        # for i in tqdm(range(0, self.nsrc, batch_size), desc="GPU pointing matrix", miniters = self.nsrc//20):
+        for i in range(0, self.nsrc, batch_size):
+            batch_end = min(i + batch_size, self.nsrc)
+            bs = batch_end - i
 
-    #     all_rows, all_cols, all_data = [], [], []
+            # Source positions in batch
+            sx_batch = sx[i:batch_end][:, None]  # bs x 1
+            sy_batch = sy[i:batch_end][:, None]  # bs x 1
 
-    #     for i in range(0, nsrc, batch_size):
-    #         if i % 300 == 0:
-    #             print(i)
-    #         end = min(i + batch_size, nsrc)
-    #         batch_idx = jnp.arange(i, end)
-    #         sx_batch = self.sx[i:end]
-    #         sy_batch = self.sy[i:end]
+            # Compute dx/dy for all map pixels (broadcasted)
+            dx = -torch.round(sx_batch).int() + pindx[centre1] + sx_pix[None, :]  # bs x snpix
+            dy = -torch.round(sy_batch).int() + pindy[centre2] + sy_pix[None, :]  # bs x snpix
 
-    #         # Compute pointing matrix for this batch
-    #         rows_b, cols_b, data_b = jax.vmap(
-    #             lambda sx_val, sy_val, src_idx: self.process_single_source(
-    #                 interp, sx_val, sy_val, self.sx_pix, self.sy_pix, snpix, src_idx
-    #             )
-    #         )(sx_batch, sy_batch, batch_idx)
+            # Mask pixels outside PRF bounds
+            good = (dx >= 0) & (dx <= pindx[-1]) & (dy >= 0) & (dy <= pindy[-1])
 
-    #         # Flatten batch
-    #         rows_b = rows_b.ravel()
-    #         cols_b = cols_b.ravel()
-    #         data_b = data_b.ravel()
+            for b in range(bs):
+                if good[b].any():
+                    # Select valid pixels
+                    dx_valid = dx[b][good[b]].float()
+                    dy_valid = dy[b][good[b]].float()
 
-    #         # Keep only non-zero entries (on GPU)
-    #         mask = data_b > 1e-3 * jnp.max(data_b)
-    #         rows_b = rows_b[mask]
-    #         cols_b = cols_b[mask]
-    #         data_b = data_b[mask]
+                    # Normalize for grid_sample: [-1,1]
+                    dx_norm = 2 * dx_valid / (paxis2 - 1) - 1
+                    dy_norm = 2 * dy_valid / (paxis1 - 1) - 1
 
-    #         # Append to lists (still on GPU)
-    #         all_rows.append(rows_b)
-    #         all_cols.append(cols_b)
-    #         all_data.append(data_b)
+                    # Prepare coordinates: N x 1 x 1 x 2
+                    coords = torch.stack([dx_norm, dy_norm], dim=-1)[None, :, None, :]
 
-    #     # Concatenate everything at the end (on GPU) then convert to CPU
-    #     amat_row = jnp.concatenate(all_rows)
-    #     amat_col = jnp.concatenate(all_cols)
-    #     amat_data = jnp.concatenate(all_data)
+                    # PRF has shape 1 x 1 x H x W
+                    prf_val = torch.nn.functional.grid_sample(
+                        prf[None, None, :, :], coords, mode='bilinear', padding_mode='zeros', align_corners=True
+                    )
 
-    #     self.amat_row = np.array(amat_row)
-    #     self.amat_col = np.array(amat_col)
-    #     self.amat_data = np.array(amat_data)
+                    prf_val = prf_val.flatten()
 
-    # def get_pointing_matrix_per_source(self, s):
-    #     from scipy import interpolate
+                    # Threshold tiny values as CPU version does
+                    keep = prf_val > (prf_val.max() / 1e3)
 
-    #     """Calculate the pointing matrix for an individual source."""
-    #     paxis1, paxis2 = self.prf.shape
+                    amat_data.append(prf_val[keep].cpu().numpy())
+                    amat_row.append(torch.arange(snpix, device=device)[good[b]][keep].cpu().numpy())
+                    amat_col.append(np.full(keep.sum().item(), i+b, dtype=int))
 
-    #     centre_x = self.pindx[np.rint((paxis1 - 1.) / 2).astype(np.long)]
-    #     centre_y = self.pindy[np.rint((paxis2 - 1.) / 2).astype(np.long)]
+        # Concatenate all batches
+        self.amat_data = np.concatenate(amat_data)
+        self.amat_row = np.concatenate(amat_row)
+        self.amat_col = np.concatenate(amat_col)
 
-    #     # diff from centre of beam for each pixel in x
-    #     dx = -np.rint(self.sx[s]).astype(np.long) + centre_x + self.sx_pix
-
-    #     # diff from centre of beam for each pixel in y
-    #     dy = -np.rint(self.sy[s]).astype(np.long) + centre_y + self.sy_pix
-
-    #     # diff from each pixel in prf
-    #     # pindx = self.pindx + self.sx[s] - np.rint(self.sx[s]).astype(np.long)
-    #     # pindy = self.pindy + self.sy[s] - np.rint(self.sy[s]).astype(np.long)
-    #     pindx = self.pindx # for SIDES, use this, for real data use above
-    #     pindy = self.pindy
-
-    #     good = (dx >= 0) & (dx < self.pindx[paxis1 - 1]) & (dy >= 0) & (dy < self.pindy[paxis2 - 1])
-    #     # ngood = good.sum()
-
-    #     if good.sum() == 0: # This should never happen? but if it does it saves the interpolation.
-    #         return np.array([], dtype=float), np.array([], dtype=int), np.array([], dtype=int)
-
-    #     # bad = np.asarray(good) == False
-    #     # nbad = bad.sum()
-
-    #     ipx2, ipy2 = np.meshgrid(pindx, pindy)
-
-    #     # method should be linear or cubic, nearest causes some issues 
-    #     atemp = interpolate.griddata((ipx2.ravel(), ipy2.ravel()), self.prf.ravel(), (dx[good], dy[good]),
-    #                                         method='linear')
-        
-    #     if atemp.size == 0:
-    #         return np.array([], dtype=float), np.array([], dtype=int), np.array([], dtype=int)
-        
-
-    #     keep=atemp > np.max(atemp)/1.0E3
-    #     amat_data = atemp[keep]
-    #     amat_row = np.arange(0, self.snpix, dtype=int)[good][keep]  # what pixels the source contributes to
-    #     amat_col = np.full(keep.sum(), s)  # what source we are on
- 
-    #     return amat_data, amat_row, amat_col
-
-    # def get_pointing_matrix_per_batch(self, batch_sources):
-    #     """Calculate pointing matrix for a batch of sources."""
-
-    #     data = np.array([])
-    #     row = np.array([])
-    #     col = np.array([])
-    #     for s in batch_sources:
-    #         d, r, c = self.get_pointing_matrix_per_source(s)
-    #         data = np.append(data, d)
-    #         row = np.append(row, r)
-    #         col = np.append(col, c)
-    #     return data, row, col
-
-    # def batcher(self, num_sources, batch_size):
-    #     """Split sources into batches"""
-    #     # could this not be [range(i:i+n) for i in range(0, )]. and remove this function as a whole
-    #     for i in range(0, len(num_sources), batch_size):
-    #         yield num_sources[i:i+batch_size]
-    #     return
-
-    # def get_pointing_matrix_parallel(self):
-    #     """Calculate pointing matrix for all sources in parallel. See get_pointing_matrix."""
-
-    #     # If one interpolation takes ~ 0.5 s, 120 sources per batch should take ~1 min per batch.
-    #     batches = list(self.batcher(range(self.nsrc), 120))
-
-    #     results = Parallel(n_jobs=-1)(delayed(self.get_pointing_matrix_per_batch)(batch) for batch in batches)
-
-    #     amat_data, amat_row, amat_col = zip(*results)
-        
-    #     self.amat_data = np.concatenate(amat_data).ravel().astype(np.int64)
-    #     self.amat_row = np.concatenate(amat_row).ravel().astype(np.int64)
-    #     self.amat_col = np.concatenate(amat_col).ravel().astype(np.int64)
 
 class hier_prior(object):
     def __init__(self,phys_prior_table, emulator,emulator_file,hier_params):

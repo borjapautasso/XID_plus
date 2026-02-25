@@ -3,56 +3,33 @@ Combines bp_xid_prior and bp_xid_functions into one folder,
 contains functions for both making priors, and running XID+
 """
 
-from astropy import wcs
-from astropy import units as u
-from astropy.coordinates import SkyCoord
-from astropy.convolution import Gaussian2DKernel
+import os
+import pickle
+from pathlib import Path
+from time import time
+from typing import Optional, Literal
+
+import numpy as np
+import pandas as pd
+
 import astropy.convolution as conv
-from astropy.io import ascii, fits
-from astropy.stats import gaussian_sigma_to_fwhm
-from astropy.table import Table
-import numpy as np
-import os
-import pickle
-import pymoc
-import pandas as pd
-
-import xidplus
-from xidplus import moc_routines
-from xidplus import HPC
-
 from astropy.io import fits
-from astropy import wcs
-from astropy.table import Table, join
-import copy
-import datetime
-import dill
-from matplotlib import pyplot as plt
-import numpy as np
-import os
-import pickle
-import sys
-import xidplus
-from xidplus import moc_routines, catalogue
-from xidplus import posterior_maps as postmaps
-import pandas as pd
+from astropy.stats import sigma_clipped_stats
+from astropy.table import Table
+
+import jax.numpy as jnp
+from jax import random
+
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import MCMC, NUTS
-import jax.numpy as jnp
-from jax import random
-import numpy as np
-import jax
-import os
-from xidplus.numpyro_fit.misc import sp_matmul
-from typing import Optional, Literal
-from astropy.stats import sigma_clipped_stats
 
+from scipy.interpolate import interp1d
 from scipy.ndimage import median_filter, uniform_filter
-from skimage.filters.rank import median as rank_median
-from skimage.morphology import square
-from time import time
-from pathlib import Path
+
+import xidplus
+from xidplus import moc_routines, HPC
+from xidplus.numpyro_fit.misc import sp_matmul
 
 lustre_path = Path("/mnt/lustre/users/astro/bp259/")
 lustre_path_prima = lustre_path / "prima_data"
@@ -534,7 +511,6 @@ def run_XID_modelling(
     id_large_tile: int,
     flux_prior: Optional[float],
     output_path = None,
-    cirrus_present = None,
     cirrus_structure_path = None):
     """
     Runs XID+ through the HPC via array jobs. Alongside a general rewrite of
@@ -612,22 +588,17 @@ def run_XID_modelling(
     prior.moc = moc
     prior.cut_down_prior()
 
-    # I think I should be able to do this here?
-
-    if cirrus_structure_path == None:
-        cirrus_maps = None
+    if cirrus_structure_path is None or cirrus_structure_path == False:
+        cirrus_map = None
     else:
         beam = fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data
         cirrus_full = np.load(cirrus_structure_path)
         cirrus_full = conv.convolve_fft(cirrus_full, beam, boundary = "wrap", normalize_kernel = True, allow_huge = True)
         cirrus_tile = cirrus_full[prior.sy_pix, prior.sx_pix]
-        cirrus_maps = [cirrus_tile]
-
-
+        cirrus_map = cirrus_tile
 
     print("Starting pointing matrix", flush = True)
     tstart = time()
-    # prior.get_pointing_matrix_parallel() # Paralellised
     prior.get_pointing_matrix()
     tstop = time()
     pointing_time = tstop - tstart
@@ -635,7 +606,6 @@ def run_XID_modelling(
 
     print("Starting upper limits", flush = True)
     tstart = time()
-    # prior.upper_lim_map_parallel() # Paralellised (haven't really tested it though)
     prior.upper_lim_map()
     tstop = time()
     upper_time = tstop - tstart
@@ -648,7 +618,7 @@ def run_XID_modelling(
     # print("ONLY RUNNING ONE CHAIN!!!!!!!!")
     # fit = single_band([prior], flux_prior, num_chains = 1)
     # fit = single_band([prior], flux_prior)
-    fit = single_band([prior], flux_prior, cirrus_present, cirrus_maps)
+    fit = single_band([prior], flux_prior, cirrus_map)
 
     samples = fit.get_samples() # get samples from the fit (not sure if this is needed when using the numpyro method. I think left over)
     posterior = xidplus.posterior.posterior_numpyro(fit, [prior])
@@ -667,7 +637,7 @@ def run_XID_modelling(
     ### Save outputs
 
     outfolder_prior = outfolder / "prior"
-    outfolder_posterior = outfolder / "prior"
+    outfolder_posterior = outfolder / "posterior"
     outfolder_summary = outfolder / "summary"
     
     if not os.path.isdir(outfolder_prior):
@@ -720,161 +690,12 @@ def run_XID_modelling(
 
     print("Completed")
 
-def run_XID_modelling_gpu(
-    prior_name: str,
-    output_name: str,
-    job_array_num: int,
-    order: int,
-    order_large: int,
-    id_large_tile: int,
-    flux_prior_knowledge: Optional[float]):
-    """
-    Runs XID+ through the HPC via array jobs. Alongside a general rewrite of
-    ``run_xid.ipynb`` from James, also parallelises the pointing matrix and
-    upper limit calculations.
-    
-    Args:
-        prior_name:
-            Name of the prior to be used. There needs to be prior created
-            with this name.
-        output_name:
-            Name of output .csv file.
-        job_array_num:
-            SLURM array job number, specifies both band and small tile.
-        order:
-            HEALPix order of small tile.
-        order_large:
-            HEALPix order of large tile.
-        id_large_tile:
-            HEALPix ID of large tile.
-        flux_prior_knowledge:
-            Flux knowledge to use in modelling. If ``None`` uses a flat prior.
-            Otherwise it's the factor between the true flux and the stdev of
-            the prior. st dev / true flux = factor
-    """
-    from time import time
-    print("Need to sort this out. All the paths are gonna be wrong. This will crash but just to let you (me) know lol")
-    # Needs to be global for the MCMC modelling. Also can't have same name as function argument.
-    global flux_prior
-    flux_prior = flux_prior_knowledge
-
-    print(f"Using {prior_name} prior.", flush = True)
-    print(f"Saving as {output_name}.")
-
-    bands = ["PRIMA_1A_1", "PRIMA_1A_2", "PRIMA_1A_3", "PRIMA_1A_4", "PRIMA_1A_5", "PRIMA_1A_6",
-            "PRIMA_1B_1", "PRIMA_1B_2", "PRIMA_1B_3", "PRIMA_1B_4", "PRIMA_1B_5", "PRIMA_1B_6",
-            "PRIMA_2A", "PRIMA_2B", "PRIMA_2C", "PRIMA_2D"]
-    
-    bands = [f"{band}_coadd" for band in bands]
-    # Defines how many small tiles there are in a large tile
-    # Used alongside job_array_num to get band and small tile
-    small_tiles_per_large = int(4**(order - order_large))
-
-    band = bands[int(job_array_num/small_tiles_per_large)]
-    index_tile = job_array_num%small_tiles_per_large
-
-    print(f"Band: {band}; Tile: {index_tile}.")
-
-    ### Prepare small tile prior
-    input_folder = "prior_processing_output/"
-
-    # Get the list of all small tile IDs
-    infile = f"{input_folder}{band}/{prior_name}_Tiles.pkl"
-    with open(infile, "rb") as f:
-        obj = pickle.load(f)
-    all_tiles = obj["tiles"]
-
-    # Mask list to get small tile IDs within the large tile
-    tile_mask = np.full_like(all_tiles, False, dtype=bool)
-    for itile, tile in enumerate(all_tiles):
-        itile_large = moc_routines.tile_in_tile(order, tile,order_large)
-        if itile_large == id_large_tile:
-            tile_mask[itile] = True
-    tiles = all_tiles[tile_mask]
-    
-    # Load Prior object for large tile
-    infile = f"{input_folder}{band}/{prior_name}_Tile_{id_large_tile}_{order_large}.pkl" # load tile_large pickle
-    with open(infile, "rb") as f:
-        obj = pickle.load(f)
-    prior = obj["priors"]
-    
-    # Trim prior to small tile area
-    moc = moc_routines.get_fitting_region(order, tiles[index_tile])
-    prior.moc = moc
-    prior.cut_down_prior()
-
-    print("Starting pointing matrix", flush = True)
-    print(prior.sx.shape, prior.sy.shape, prior.snpix)
-    tstart = time()
-    # prior.get_pointing_matrix_parallel() # Paralellised
-    prior.get_pointing_matrix_jax()
-    tstop = time()
-    pointing_time = tstop - tstart
-    print(f"Pointing matrix calculated in: {pointing_time:.3f} s", flush = True)
-
-    # tstart = time()
-    # # prior.upper_lim_map_parallel() # Paralellised (haven't really tested it though)
-    # prior.upper_lim_map()
-    # tstop = time()
-    # upper_time = tstop - tstart
-    # print(f"Upper limits calculated in: {upper_time:.3f} s", flush = True)
-
-    print(f"Prior object ready for small tile {tiles[index_tile]}, HEALpix order = {order} (Large Tile {id_large_tile}, HEALpix order = {order_large})")
-    
-    ### Runs numpyro fitting on the small tile
-    tstart = time()
-    fit = single_band([prior], flux_prior, num_chains = 2)
-    tstop = time()
-    model_time = tstop - tstart
-    print(f"Modelling completed in: {model_time:.3f} s", flush = True)
-
-    samples = fit.get_samples() # get samples from the fit (not sure if this is needed when using the numpyro method. I think left over)
-    posterior = xidplus.posterior.posterior_numpyro(fit, [prior])
-
-    ### Output modelling results to a .csv
-
-    # Mask out sources which were in the modelling due to the tile expansion
-    # but not technically within the small tile.
-    kept_sources = moc_routines.sources_in_tile([tiles[index_tile]],order,prior.sra,prior.sdec)
-
-    ra = prior.sra[kept_sources]
-    dec = prior.sdec[kept_sources]
-    f_true = prior.prior_flux_mu[kept_sources]
-
-    f_xid = np.percentile(posterior.samples['src_f'][:,0,:], 50.0, axis=0)[kept_sources]
-    f_xid_l = np.percentile(posterior.samples['src_f'][:,0,:], 15.9, axis=0)[kept_sources]
-    f_xid_u = np.percentile(posterior.samples['src_f'][:,0,:], 84.1, axis=0)[kept_sources]
-
-    output_folder = f"xid_outputs/{output_name}/"
-    if not os.path.isdir(output_folder):
-            os.makedirs(output_folder)
-
-    df = pd.DataFrame(data = {"f_true": f_true,
-                              "f_xid": f_xid,
-                              "f_xid_l": f_xid_l,
-                              "f_xid_u": f_xid_u,
-                              "ra": ra,
-                              "dec": dec
-                              })
-        
-    df.to_csv(f"{output_folder}xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}.csv", index = False)
-
-    # ### Save time taken to run the small tile:
-    # with open(f"speed_test_{order}_{index_tile}.txt", "w") as f:
-    #     f.write(f"{pointing_time}, {upper_time}, {model_time}")
-
-    # Diagnostics to check mcmc run correctly, should be 0 for all three
-    print(np.sum(np.array(posterior.divergences)))
-    print(np.sum(posterior.Rhat['src_f'] >= 1.1))
-    print(np.sum(posterior.n_eff['src_f']/posterior.samples['src_f'].shape[0] < 0.001))
-
 ### Modelling helper functions
 
 def single_model(
     priors,
     flux_prior: float|None = None,
-    cirrus_present: bool = False,
-    cirrus_maps: np.ndarray|None = None
+    cirrus_map: np.ndarray|None = None
     ):
 
     pointing_matrices = [([p.amat_row, p.amat_col], p.amat_data) for p in priors]
@@ -884,7 +705,8 @@ def single_model(
     bkg_sig = np.asarray([p.bkg[1] for p in priors]).T
     flux_mu = np.asarray([p.prior_flux_mu for p in priors]).T
     flux_sigma = np.asarray([p.prior_flux_sigma for p in priors]).T
-
+    # Checked the effect of moving this outside of the function since currently it is being
+    # recreated every sample, but is negligible compared to everything else
 
 
     with numpyro.plate('bands', len(priors)):
@@ -893,10 +715,7 @@ def single_model(
         bkg = numpyro.sample('bkg', dist.Normal(bkg_mu, bkg_sig))
 
         # probably should just check if not none, no poin for the bool
-        if cirrus_present:
-            if cirrus_maps is None:
-                raise ValueError("cirrus_present = True but cirrus_maps is None")
-
+        if cirrus_map is not None:
             cirrus_scale = numpyro.sample('cirrus_scale', dist.Uniform(0, 100))
 
         with numpyro.plate('nsrc', priors[0].nsrc):
@@ -905,97 +724,23 @@ def single_model(
             else:
                 src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
 
- 
-    db_hat_psw = sp_matmul(pointing_matrices[0], src_f[:, 0][:, None], priors[0].snpix).reshape(-1) + bkg[0]
+    # Modelled map = convolved sources + bkg (+ cirrus)
+    modelled_map = sp_matmul(pointing_matrices[0], src_f[:, 0][:, None], priors[0].snpix).reshape(-1) + bkg[0]
 
-    if cirrus_present:
-        cirrus_component = cirrus_scale[0] * cirrus_maps[0].reshape(-1)
-        db_hat_psw += cirrus_component
+    if cirrus_map is not None:
+        cirrus_component = cirrus_scale[0] * cirrus_map.reshape(-1)
+        modelled_map += cirrus_component
 
-    sigma_tot_psw = jnp.sqrt(jnp.power(priors[0].snim, 2) + jnp.power(sigma_conf[0], 2))
+    # Total noise = sqrt(inst^2 + conf^2)
+    sigma_tot = jnp.sqrt(jnp.power(priors[0].snim, 2) + jnp.power(sigma_conf[0], 2))
 
     with numpyro.plate('psw_pixels', priors[0].snim.size):  # as ind_psw:
-        numpyro.sample("obs_psw", dist.Normal(db_hat_psw, sigma_tot_psw), obs = priors[0].sim)
-
-# def single_model_flat(priors):
-#     pointing_matrices = [([p.amat_row, p.amat_col], p.amat_data) for p in priors]
-#     flux_lower = np.asarray([p.prior_flux_lower for p in priors]).T
-#     flux_upper = np.asarray([p.prior_flux_upper for p in priors]).T
-#     bkg_mu= np.asarray([p.bkg[0] for p in priors]).T
-#     bkg_sig = np.asarray([p.bkg[1] for p in priors]).T
-
-#     with numpyro.plate('bands', len(priors)):
-#         sigma_conf = numpyro.sample('sigma_conf', dist.HalfCauchy(scale = 0.5))
-
-#         bkg = numpyro.sample('bkg', dist.Normal(bkg_mu, bkg_sig))
-
-#         with numpyro.plate('nsrc', priors[0].nsrc):
-#             src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
-
-
-#     db_hat_psw = sp_matmul(pointing_matrices[0], src_f[:, 0][:, None], priors[0].snpix).reshape(-1) + bkg[0]
-
-#     sigma_tot_psw = jnp.sqrt(jnp.power(priors[0].snim, 2) + jnp.power(sigma_conf[0], 2))
-
-#     with numpyro.plate('psw_pixels', priors[0].snim.size):  # as ind_psw:
-#         numpyro.sample("obs_psw", dist.Normal(db_hat_psw, sigma_tot_psw), obs = priors[0].sim)
-
-# def single_model_gaussian(priors):
-#     pointing_matrices = [([p.amat_row, p.amat_col], p.amat_data) for p in priors]
-#     flux_lower = np.asarray([p.prior_flux_lower for p in priors]).T
-#     flux_upper = np.asarray([p.prior_flux_upper for p in priors]).T
-#     flux_mu = np.asarray([p.prior_flux_mu for p in priors]).T
-#     flux_sigma = np.asarray([p.prior_flux_sigma for p in priors]).T * flux_prior
-
-#     bkg_mu= np.asarray([p.bkg[0] for p in priors]).T
-#     bkg_sig = np.asarray([p.bkg[1] for p in priors]).T
-
-#     with numpyro.plate('bands', len(priors)):
-#         sigma_conf = numpyro.sample('sigma_conf', dist.HalfCauchy(scale = 0.5))
-#         bkg = numpyro.sample('bkg', dist.Normal(bkg_mu, bkg_sig))
-#         with numpyro.plate('nsrc', priors[0].nsrc):
-#             src_f = numpyro.sample('src_f', dist.TruncatedNormal(flux_mu, flux_sigma, low = flux_lower, high = flux_upper))
-#     db_hat_psw = sp_matmul(pointing_matrices[0], src_f[:, 0][:, None], priors[0].snpix).reshape(-1) + bkg[0]
-
-#     sigma_tot_psw = jnp.sqrt(jnp.power(priors[0].snim, 2) + jnp.power(sigma_conf[0], 2))
-
-#     with numpyro.plate('psw_pixels', priors[0].snim.size):  # as ind_psw:
-#         numpyro.sample("obs_psw", dist.Normal(db_hat_psw, sigma_tot_psw), obs = priors[0].sim)
-
-# def single_model_flat_with_cirrus(priors, cirrus_structure):
-#     pointing_matrices = [([p.amat_row, p.amat_col], p.amat_data) for p in priors]
-#     flux_lower = np.asarray([p.prior_flux_lower for p in priors]).T
-#     flux_upper = np.asarray([p.prior_flux_upper for p in priors]).T
-#     bkg_mu= np.asarray([p.bkg[0] for p in priors]).T
-#     bkg_sig = np.asarray([p.bkg[1] for p in priors]).T
-
-#     with numpyro.plate('bands', len(priors)):
-#         sigma_conf = numpyro.sample('sigma_conf', dist.HalfCauchy(scale = 0.5))
-        
-#         bkg = numpyro.sample('bkg', dist.Normal(bkg_mu, bkg_sig))
-
-#         if cirrus_maps is not None:
-#             cirrus_scale = numpyro.sample('cirrus_scale', dist.HalfNormal(scale=1.0))
-
-#         with numpyro.plate('nsrc', priors[0].nsrc):
-#             src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
-
-
-#     db_hat_psw = sp_matmul(pointing_matrices[0], src_f[:, 0][:, None], priors[0].snpix).reshape(-1) + bkg[0]
-
-
-
-#     sigma_tot_psw = jnp.sqrt(jnp.power(priors[0].snim, 2) + jnp.power(sigma_conf[0], 2))
-
-#     with numpyro.plate('psw_pixels', priors[0].snim.size):  # as ind_psw:
-#         numpyro.sample("obs_psw", dist.Normal(db_hat_psw, sigma_tot_psw), obs = priors[0].sim)
-
+        numpyro.sample("obs_psw", dist.Normal(modelled_map, sigma_tot), obs = priors[0].sim)
 
 def single_band(
     priors,
     flux_prior: float|None = None,
-    cirrus_present: bool|None = None,
-    cirrus_maps: np.ndarray|None = None,
+    cirrus_map: np.ndarray|None = None,
     num_samples = 500,
     num_warmup = 500,
     num_chains = 4,
@@ -1006,29 +751,9 @@ def single_band(
     nuts_kernel = NUTS(single_model, init_strategy = numpyro.infer.init_to_median())
     mcmc = MCMC(nuts_kernel, num_samples = num_samples, num_warmup = num_warmup, num_chains = num_chains, chain_method = chain_method)
     rng_key = random.PRNGKey(0)
-    mcmc.run(rng_key, priors, flux_prior, cirrus_present, cirrus_maps, extra_fields = ('potential_energy', 'energy',))
-
+    mcmc.run(rng_key, priors, flux_prior, cirrus_map, extra_fields = ('potential_energy', 'energy',))
+    # How does this do the progress bar, how to tweak.
     return mcmc
-
-# def single_band(priors, flux_prior, num_samples = 500, num_warmup = 500, num_chains = 4, chain_method = 'parallel'):
-#     numpyro.set_host_device_count(num_chains)
-
-#     if cirrus_present:
-#         nuts_kernel = NUTS(single_model_flat_with_cirrus, init_strategy = numpyro.infer.init_to_median())
-#     elif flux_prior == None:
-#         nuts_kernel = NUTS(single_model_flat, init_strategy = numpyro.infer.init_to_median())
-#     else:
-#         nuts_kernel = NUTS(single_model_gaussian, init_strategy = numpyro.infer.init_to_median())
-#     nuts_kernel = NUTS(single_model, init_strategy = numpyro.infer.init_to_median())
-#     mcmc = MCMC(nuts_kernel, num_samples = num_samples, num_warmup = num_warmup, num_chains = num_chains, chain_method = chain_method)
-#     rng_key = random.PRNGKey(0)
-#     mcmc.run(rng_key, priors, flux_prior, cirrus_present, cirrus_maps extra_fields = ('potential_energy', 'energy',))
-
-#     if cirrus_present:
-#         mcmc.run(rng_key, priors,  extra_fields = ('potential_energy', 'energy',))
-#     else:
-#         mcmc.run(rng_key, priors,  extra_fields = ('potential_energy', 'energy',))
-#     return mcmc
 
 ### Prior helper functions
 
@@ -1312,3 +1037,54 @@ def estimate_background(image, N=30, lower_sigma=-10, upper_sigma=3, iterations=
 
     return background
 
+
+### Posterior/modelling analysis functions
+
+
+
+
+def limiting_flux(f_xid, f_true, nbins=50):
+    f_ratio = f_xid/f_true
+
+    bmin = min(np.log10(f_true[f_true > 1e-9]))
+    bmax = max(np.log10(f_true))
+
+    bmin = -1
+    bmax = 2
+
+    bstep = (bmax - bmin)/nbins
+    bins = np.arange(bmin,bmax+bstep,bstep)
+
+    bin_width = (bins[1] - bins[0])
+    bin_centers = bins[1:] - bin_width/2
+    counts = np.zeros(len(bin_centers))
+    mad = np.zeros(len(bin_centers))
+    rms = np.zeros(len(bin_centers))
+
+    for ii, i in enumerate(bins):
+        if i == bins[-1]:
+            pass
+        else:
+            ybin = f_ratio[(f_true >= np.power(10,bins[ii])) & (f_true < np.power(10,bins[ii+1]))]
+            xbin = f_true[(f_true >= np.power(10,bins[ii])) & (f_true < np.power(10,bins[ii+1]))]
+            counts[ii] = len(ybin)
+            if len(ybin) > 0:
+                ybin_mad = 1.4826 * np.percentile(np.abs(ybin - np.percentile(ybin,50)),50) # no need to do ybin-1, they cancel out
+
+                mad[ii] = ybin_mad
+                ybin_rms = np.sqrt(np.mean((ybin - 1)**2.0))
+                rms[ii] = ybin_rms
+    return mad, rms, counts, bin_centers
+
+def get_lim(yarr, xarr, counts, lim, min_count = 10):
+    if max(yarr) < lim:
+        return min(xarr)
+    else:
+        yarr = yarr[counts > min_count] #mad
+        xarr = xarr[counts > min_count] #flux
+        gt_lim_1st = yarr[yarr >= lim][-1]
+        ind_gt_lim_1st = np.where(yarr == gt_lim_1st)[0][0]
+        lim_line = yarr[ind_gt_lim_1st:ind_gt_lim_1st+2]
+        lim_bins = xarr[ind_gt_lim_1st:ind_gt_lim_1st+2]
+        interp = interp1d(lim_line,lim_bins)
+        return interp(lim)
