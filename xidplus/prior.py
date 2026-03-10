@@ -355,15 +355,13 @@ class prior(object):
         # Maybe should check order and take into accoutn, but need testing.
 
         # Either way if tile is small doubt itll make much difference
-        try:
-            gpu_devices = jax.devices("gpu")
-            if gpu_devices:
-                print("GPU detected, running with GPU.")
-                self.get_pointing_matrix_GPU()
-        except RuntimeError:
+
+        if jax.default_backend() == "gpu":
+            print("GPU detected, running with GPU.")
+            self.get_pointing_matrix_GPU()
+        else:
             print("GPU not detected, running with CPU.")
             self.get_pointing_matrix_CPU()
-
 
     def get_pointing_matrix_CPU(self):
         """
