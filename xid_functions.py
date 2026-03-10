@@ -17,6 +17,7 @@ from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
 from astropy.table import Table
 
+import jax
 import jax.numpy as jnp
 from jax import random
 
@@ -474,6 +475,7 @@ def xid_prior(
     tiles = moc_routines.get_HEALPix_pixels(order, inra, indec, unique = True)
     tiles_large = moc_routines.get_HEALPix_pixels(order_large, inra, indec, unique = True)
 
+    # +1 since hierarchical_tile needs it, dont like it but easier this way.
     index_large_tile = np.where(tiles_large == id_large_tile)[0][0] + 1
     
     print(f"----- There are {len(tiles)} tiles required for input catalogue and {len(tiles_large)} large tiles.", flush = True)
@@ -511,7 +513,13 @@ def run_XID_modelling(
     id_large_tile: int,
     flux_prior: Optional[float],
     output_path = None,
-    cirrus_structure_path = None):
+    cirrus_structure_path = None,
+    num_samples = 500,
+    num_warmup = 500,
+    num_chains = 4,
+    chain_method = "parallel",
+    output: bool = True
+    ):
     """
     Runs XID+ through the HPC via array jobs. Alongside a general rewrite of
     ``run_xid.ipynb`` from James.
@@ -542,7 +550,8 @@ def run_XID_modelling(
     else:
         if not isinstance(output_path, Path):
             outfolder = Path(output_path) / output_name
-
+        else:
+            outfolder = outfolder / output_name
     print(f"Using {prior_name} prior.", flush = True)
     print(f"Saving as {output_name}.")
 
@@ -588,6 +597,11 @@ def run_XID_modelling(
     prior.moc = moc
     prior.cut_down_prior()
 
+    # essentially everything above here is doing the same thing done in HPC.hierarchical_tile_single in the prior function.
+    # Given I never use the numbered tile just
+
+    print(f"{prior.nsrc} sources in prior")
+
     if cirrus_structure_path is None or cirrus_structure_path == False:
         cirrus_map = None
     else:
@@ -597,14 +611,14 @@ def run_XID_modelling(
         cirrus_tile = cirrus_full[prior.sy_pix, prior.sx_pix]
         cirrus_map = cirrus_tile
 
-    print("Starting pointing matrix", flush = True)
+    print("\nStarting pointing matrix", flush = True)
     tstart = time()
     prior.get_pointing_matrix()
     tstop = time()
     pointing_time = tstop - tstart
     print(f"Pointing matrix calculated in {pointing_time:.3f} s", flush = True)
 
-    print("Starting upper limits", flush = True)
+    print("\nStarting upper limits", flush = True)
     tstart = time()
     prior.upper_lim_map()
     tstop = time()
@@ -614,79 +628,76 @@ def run_XID_modelling(
     print(f"Prior object ready for small tile {tiles[index_tile]}, HEALpix order = {order} (Large Tile {id_large_tile}, HEALpix order = {order_large})")
     
     ### Runs numpyro fitting on the small tile
+    print("\nStarting modelling", flush = True)
     tstart = time()
-    # print("ONLY RUNNING ONE CHAIN!!!!!!!!")
-    # fit = single_band([prior], flux_prior, num_chains = 1)
-    # fit = single_band([prior], flux_prior)
-    fit = single_band([prior], flux_prior, cirrus_map)
+    fit = single_band([prior], flux_prior, cirrus_map, num_samples, num_warmup, num_chains, chain_method)
 
     samples = fit.get_samples() # get samples from the fit (not sure if this is needed when using the numpyro method. I think left over)
     posterior = xidplus.posterior.posterior_numpyro(fit, [prior])
 
     tstop = time()
     model_time = tstop - tstart
-    print(f"Modelling completed in: {model_time:.3f} s", flush = True)
+    print(f"\nModelling completed in: {model_time:.3f} s", flush = True)
 
     # Diagnostics to check mcmc run correctly, should be 0 for all three
     print(np.sum(np.array(posterior.divergences)))
     print(np.sum(posterior.Rhat['src_f'] >= 1.1))
     print(np.sum(posterior.n_eff['src_f']/posterior.samples['src_f'].shape[0] < 0.001))
 
-    print("Saving results...")
 
-    ### Save outputs
+    if output:
+        print("Saving results...")
 
-    outfolder_prior = outfolder / "prior"
-    outfolder_posterior = outfolder / "posterior"
-    outfolder_summary = outfolder / "summary"
-    
-    if not os.path.isdir(outfolder_prior):
-        os.makedirs(outfolder_prior)
 
-    if not os.path.isdir(outfolder_posterior):
-        os.makedirs(outfolder_posterior)
+        ### Save outputs
 
-    if not os.path.isdir(outfolder_summary):
-        os.makedirs(outfolder_summary)
-
-    outfile_prior = outfolder_prior / f"xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}_prior.pkl"
-    outfile_posterior = outfolder_posterior / f"xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}_posterior.pkl"
-    outfile_summary = outfolder_summary / f"xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}_summary.csv"
-
-    # Mask out sources which were in the modelling due to the tile expansion
-    # but not technically within the small tile.
-    kept_sources = moc_routines.sources_in_tile([tiles[index_tile]],order,prior.sra,prior.sdec)
-
-    ra = prior.sra[kept_sources]
-    dec = prior.sdec[kept_sources]
-    f_true = prior.prior_flux_mu[kept_sources]
-
-    f_xid = np.percentile(posterior.samples['src_f'][:,0,:], 50.0, axis=0)[kept_sources]
-    f_xid_l = np.percentile(posterior.samples['src_f'][:,0,:], 15.9, axis=0)[kept_sources]
-    f_xid_u = np.percentile(posterior.samples['src_f'][:,0,:], 84.1, axis=0)[kept_sources]
-
-    ### Output results to pkl
-    with open(outfile_prior, "wb") as f:
-        pickle.dump({"prior": prior}, f)
+        outfolder_prior = outfolder / "prior"
+        outfolder_posterior = outfolder / "posterior"
+        outfolder_summary = outfolder / "summary"
         
-    with open(outfile_posterior, "wb") as f:
-        pickle.dump({"posterior": posterior,
-                     "kept_sources": kept_sources}, f)
+        if not os.path.isdir(outfolder_prior):
+            os.makedirs(outfolder_prior)
+
+        if not os.path.isdir(outfolder_posterior):
+            os.makedirs(outfolder_posterior)
+
+        if not os.path.isdir(outfolder_summary):
+            os.makedirs(outfolder_summary)
+
+        outfile_prior = outfolder_prior / f"xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}_prior.pkl"
+        outfile_posterior = outfolder_posterior / f"xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}_posterior.pkl"
+        outfile_summary = outfolder_summary / f"xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}_summary.csv"
+
+        # Mask out sources which were in the modelling due to the tile expansion
+        # but not technically within the small tile.
+        kept_sources = moc_routines.sources_in_tile([tiles[index_tile]],order,prior.sra,prior.sdec)
+
+        ra = prior.sra[kept_sources]
+        dec = prior.sdec[kept_sources]
+        f_true = prior.prior_flux_mu[kept_sources]
+
+        f_xid = np.percentile(posterior.samples['src_f'][:,0,:], 50.0, axis=0)[kept_sources]
+        f_xid_l = np.percentile(posterior.samples['src_f'][:,0,:], 15.9, axis=0)[kept_sources]
+        f_xid_u = np.percentile(posterior.samples['src_f'][:,0,:], 84.1, axis=0)[kept_sources]
+
+        ### Output results to pkl
+        with open(outfile_prior, "wb") as f:
+            pickle.dump({"prior": prior}, f)
+            
+        with open(outfile_posterior, "wb") as f:
+            pickle.dump({"posterior": posterior,
+                        "kept_sources": kept_sources}, f)
 
 
-    df = pd.DataFrame(data = {"f_true": f_true,
-                              "f_xid": f_xid,
-                              "f_xid_l": f_xid_l,
-                              "f_xid_u": f_xid_u,
-                              "ra": ra,
-                              "dec": dec
-                              })
-        
-    df.to_csv(outfile_summary, index = False)
-
-    # ### Save time taken to run the small tile:
-    # with open(f"speed_test_{order}_{index_tile}.txt", "w") as f:
-    #     f.write(f"{pointing_time}, {upper_time}, {model_time}")
+        df = pd.DataFrame(data = {"f_true": f_true,
+                                "f_xid": f_xid,
+                                "f_xid_l": f_xid_l,
+                                "f_xid_u": f_xid_u,
+                                "ra": ra,
+                                "dec": dec
+                                })
+            
+        df.to_csv(outfile_summary, index = False)
 
     print("Completed")
 
@@ -746,13 +757,31 @@ def single_band(
     num_chains = 4,
     chain_method = "parallel"
     ):
-    numpyro.set_host_device_count(num_chains)
+
+    if jax.default_backend() == "gpu":
+        print("GPU detected, running with GPU.")
+        print(f"{jax.device_count()} GPU(s) detected.")
+    else:
+        # Assumes if running with CPUs, will have multiple cores
+        # Works for current workflow w HPC but not always
+        print("GPU not detected, running with CPU.")
+        numpyro.set_host_device_count(num_chains)
+
+    print("\nMODELLING PARAMETERS:")
+    print(f"{flux_prior = }")
+    print(f"{type(cirrus_map) = }")
+    print(f"{num_samples = }")
+    print(f"{num_warmup = }")
+    print(f"{num_chains = }")
+    print(f"{chain_method = }")
 
     nuts_kernel = NUTS(single_model, init_strategy = numpyro.infer.init_to_median())
     mcmc = MCMC(nuts_kernel, num_samples = num_samples, num_warmup = num_warmup, num_chains = num_chains, chain_method = chain_method)
     rng_key = random.PRNGKey(0)
+    # if chain_method == "vectorized" and num_chains > 1:
+    #     rng_key = random.split(rng_key, num_chains)
     mcmc.run(rng_key, priors, flux_prior, cirrus_map, extra_fields = ('potential_energy', 'energy',))
-    # How does this do the progress bar, how to tweak.
+    # How does this do the progress bar, how to tweak it for slurm :/.
     return mcmc
 
 ### Prior helper functions
@@ -1039,9 +1068,6 @@ def estimate_background(image, N=30, lower_sigma=-10, upper_sigma=3, iterations=
 
 
 ### Posterior/modelling analysis functions
-
-
-
 
 def limiting_flux(f_xid, f_true, nbins=50):
     f_ratio = f_xid/f_true

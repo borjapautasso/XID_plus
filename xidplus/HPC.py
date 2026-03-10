@@ -82,14 +82,16 @@ def hierarchical_tile_single(masterfile, tilefile, output_folder, catname, index
     # The large tile in question
     large_tile = tiles_large[index_large_tile - 1]
 
-    moc = moc_routines.get_fitting_region(order_large, large_tile)
-    # moc = moc_routines.get_fitting_region_noexpand(order_large, tiles_large[taskid - 1]) #useful for plotting it
-    # print(f"large tile id: {tiles_large[taskid - 1]}")
-    # print(f"area of tile: {moc.area_sq_deg} deg^2")
+    # Original
+    # moc = moc_routines.get_fitting_region_bp(order_large, large_tile)
+    
+    # Less padding
+    moc = moc_routines.get_fitting_region_less_padding(order_large, large_tile)
+
     for p in [priors]:
         p.moc = moc
         p.cut_down_prior()
-    
+        print(p.nsrc)
     outfile = output_folder / f"{catname}_Tile_{large_tile}_{order_large}.pkl"
     # outfile = f"prior_processing_output/{band}/{catname}_Tile_"+ str(large_tile) + '_' + str(order_large) + '.pkl'
     with open(outfile, 'wb') as f:

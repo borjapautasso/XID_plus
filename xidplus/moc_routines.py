@@ -41,6 +41,7 @@ def get_fitting_region(order,pixel):
     #define old and new order
     old_nside=2**order
     new_nside=2**(order+2)
+    # For very large tiles, this is way too much padding. Reduce to cap of a few 9s
 
     #get co-ord of main pixel
     theta,phi=pixelfunc.pix2ang(old_nside, pixel, nest=True)
@@ -52,8 +53,12 @@ def get_fitting_region(order,pixel):
     pix_fit=pixelfunc.ang2pix(new_nside, theta+offset_theta, phi+offset_phi, nest=True)
     #get neighbouring pixels and remove duplicates
     moc_tile=MOC()
+
+    # Add two rings of order+2 tiles (effectively a ring of order+1 tiles) to the MOC.
+
     pixels=np.unique(pixelfunc.get_all_neighbours(new_nside, pix_fit,nest=True))
     moc_tile.add(order+2,np.unique(pixelfunc.get_all_neighbours(new_nside, pixels,nest=True)))
+
     return moc_tile
 
 def get_fitting_region_noexpand(order,pixel, expand_order = 2):
@@ -89,6 +94,39 @@ def get_fitting_region_noexpand(order,pixel, expand_order = 2):
     moc.add(new_order, subpixels)
     
     return moc
+
+def get_fitting_region_less_padding(order, pixel):
+    """
+    Expand fitting region by a ring of o11 tiles.
+    """
+    PADDING_ORDER = 11
+    padding_nside = 2**PADDING_ORDER
+
+    # Number of order-11 sub-pixels in the original tile
+    level_diff = PADDING_ORDER - order
+    n_sub = 4**level_diff
+
+    # Contiguous block of order-11 sub-pixels (nested scheme)
+    sub_pixels = np.arange(n_sub * pixel, n_sub * pixel + n_sub)
+
+    # One ring of order-11 neighbours around the boundary
+    neighbours = np.unique(pixelfunc.get_all_neighbours(padding_nside, sub_pixels, nest=True))
+    neighbours = neighbours[neighbours >= 0]
+
+    # Union of interior + ring
+    all_pixels = np.unique(np.concatenate([sub_pixels, neighbours]))
+
+    moc_tile = MOC()
+    moc_tile.add(PADDING_ORDER, all_pixels)
+
+    # for order, pixels in moc_tile:
+    #     print(order, pixels)
+
+    # orders, pixels = moc_tile.to_depth_list()
+
+    # print(orders)
+    # print(pixels)
+    return moc_tile
 
 def create_MOC_from_map(good,wcs):
     """Generate MOC from map
