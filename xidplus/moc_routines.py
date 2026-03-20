@@ -207,7 +207,7 @@ def check_in_moc(ra, dec, moc):
     moc_healpix_cells = np.array(list(moc.flattened()))
 
     # We look for sources that are in the MOC and return the mask
-    return np.in1d(source_healpix_cells, moc_healpix_cells)
+    return np.isin(source_healpix_cells, moc_healpix_cells)
 
 def check_in_moc_pdh(ra,dec,moc):
     """Check whether a source is in MOC or not

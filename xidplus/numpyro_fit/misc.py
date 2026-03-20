@@ -1,4 +1,5 @@
 import jax
+
 import pickle
 import functools
 from xidplus.numpyro_fit.neuralnet_models import CIGALE_emulator, CIGALE_emulator_kasia

@@ -1,18 +1,7 @@
 import numpy as np
-import torch
 from astropy import wcs
-from tqdm import tqdm
 from xidplus import moc_routines
 import jax
-
-# from scipy import interpolate
-# from joblib import Parallel, delayed
-# import jax
-# import jax.numpy as jnp
-# from jax.scipy.interpolate import RegularGridInterpolator
-# from jax.experimental import sparse
-
-
 
 
 class prior(object):
@@ -262,16 +251,6 @@ class prior(object):
 
         self.bkg = (mu, sigma)
 
-    def _upper_lim_map(self):
-        """Update flux upper limit to abs(bkg)+2*sigma_bkg+max(D)
-         where max(D) is maximum value of pixels the source contributes to"""
-
-        self.prior_flux_upper = np.full((self.nsrc), 1000.0)
-        for i in tqdm(range(self.nsrc), desc = "Calculating upper maps"):
-            ind = self.amat_col == i
-            if ind.sum() > 0:
-                self.prior_flux_upper[i] = np.max(self.sim[self.amat_row[ind]]) + (np.abs(self.bkg[0]) + 2 * self.bkg[1])
-
     def upper_lim_map(self):
         """
         Update flux upper limit to abs(bkg)+2*sigma_bkg+max(D)
@@ -295,56 +274,6 @@ class prior(object):
 
         self.prior_flux_upper[~empty] += bkg_term
 
-    def _get_pointing_matrix(self, bkg=True):
-        """Calculate pointing matrix. If bkg = True, bkg is fitted to all pixels. If False, bkg only fitted to where prior sources contribute
-        """
-        from scipy import interpolate
-        paxis1, paxis2 = self.prf.shape
-
-        amat_row = np.array([], dtype=int)
-        amat_col = np.array([], dtype=int)
-        amat_data = np.array([])
-
-        # ------Deal with PRF array----------
-        centre1 = np.rint((paxis1 - 1.) / 2).astype(int)
-        centre2 = np.rint((paxis2 - 1.) / 2).astype(int)
-        # create pointing array
-        for s in tqdm(range(self.nsrc), desc = "Calculating pointing matrix"):
-
-            # diff from centre of beam for each pixel in x
-            dx = -np.rint(self.sx[s]).astype(int) + self.pindx[centre1] + self.sx_pix
-            # diff from centre of beam for each pixel in y
-            dy = -np.rint(self.sy[s]).astype(int) + self.pindy[centre2] + self.sy_pix
-
-            # # diff from each pixel in prf
-            # Not using this right now, but isnt hte use of rint here a bit weird?
-            # Like it works since its consistent with dx and dy but its weird
-
-            # pindx = self.pindx + self.sx[s] - np.rint(self.sx[s]).astype(int)
-            # pindy = self.pindy + self.sy[s] - np.rint(self.sy[s]).astype(int)
-            # ipx2, ipy2 = np.meshgrid(pindx, pindy)
-
-            # Since SIDES places sources in centre of pixel, use this instead
-            ipx2, ipy2 = np.meshgrid(self.pindx, self.pindy)
-
-            good = (dx >= 0) & (dx < self.pindx[paxis1 - 1]) & (dy >= 0) & (dy < self.pindy[paxis2 - 1])
-            ngood = good.sum()
-            bad = np.asarray(good) == False
-            nbad = bad.sum()
-            
-            atemp = interpolate.griddata((ipx2.ravel(), ipy2.ravel()), self.prf.ravel(), (dx[good], dy[good]), method='linear')
-
-            if atemp.size > 0:
-                keep=atemp > np.max(atemp)/1.0E3
-                amat_data = np.append(amat_data, atemp[keep])
-                amat_row = np.append(amat_row,np.arange(0, self.snpix, dtype=int)[good][keep])  # what pixels the source contributes to
-                amat_col = np.append(amat_col, np.full(keep.sum(), s))  # what source we are on
-
-
-        self.amat_data = amat_data
-        self.amat_row = amat_row
-        self.amat_col = amat_col
-
     def get_pointing_matrix(self):
         """
         Detects whether GPU is present, and utilises it if so.
@@ -355,7 +284,7 @@ class prior(object):
         # Maybe should check order and take into accoutn, but need testing.
 
         # Either way if tile is small doubt itll make much difference
-
+        
         if jax.default_backend() == "gpu":
             print("GPU detected, running with GPU.")
             self.get_pointing_matrix_GPU()
@@ -369,6 +298,8 @@ class prior(object):
 
         O(nsrc x snpix)? Since both scale equally with tile size O(n^2)?
         Either way RGI is far far faster than the triangulation previously done.
+
+        This could be parallelised since almost always will have multiple cores.
         """
         from scipy.interpolate import RegularGridInterpolator
 
@@ -437,6 +368,9 @@ class prior(object):
 
         Produces amat_row, amat_col, amat_data identical to CPU version.
         """
+        
+        import torch
+
         # Move pixel coordinates to GPU
         sx_pix = torch.tensor(self.sx_pix, device=device, dtype=torch.float32)
         sy_pix = torch.tensor(self.sy_pix, device=device, dtype=torch.float32)

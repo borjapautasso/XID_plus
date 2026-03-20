@@ -91,7 +91,9 @@ def hierarchical_tile_single(masterfile, tilefile, output_folder, catname, index
     for p in [priors]:
         p.moc = moc
         p.cut_down_prior()
-        print(p.nsrc)
+
+        print(f"There are {p.nsrc} sources and {p.snpix} pixels in the expanded area.")
+
     outfile = output_folder / f"{catname}_Tile_{large_tile}_{order_large}.pkl"
     # outfile = f"prior_processing_output/{band}/{catname}_Tile_"+ str(large_tile) + '_' + str(order_large) + '.pkl'
     with open(outfile, 'wb') as f:

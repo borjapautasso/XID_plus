@@ -85,7 +85,7 @@ class posterior_numpyro(object):
         self.samples['src_f']=np.swapaxes(self.samples['src_f'],1,2)
         # get summary statistics. Code based on numpyro print_summary
         prob = 0.9
-        exclude_deterministic = True
+        exclude_deterministic = False # Needed if sampling in log space
         sites = mcmc._states[mcmc._sample_field]
         if isinstance(sites, dict) and exclude_deterministic:
             state_sample_field = attrgetter(mcmc._sample_field)(mcmc._last_state)

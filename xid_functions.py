@@ -36,331 +36,8 @@ lustre_path = Path("/mnt/lustre/users/astro/bp259/")
 lustre_path_prima = lustre_path / "prima_data"
 lustre_path_xid = lustre_path_prima / "xid_plus"
 
-def _xid_prior(
-    prior_name: str,
-    map_choice: Literal["v1", "v2.1"],
-    catalogue_choice: Literal["deep1", "deep5", "deep1_coadd", "deep5_coadd"],
-    bands: list[str],
-    order: int,
-    order_large:int,
-    id_large_tile: int,
-    # index_large_tile: int,
-    psf_kernels: list[np.ndarray],
-    cirrus_intensity: float,
-    annulus_bkgsubtract: bool = False,
-    photutils_bkgsubtract: bool = False,
-    nebuliser_bkgsubtract: bool = False,
-    nebuliser_n = 75):
-    """
-    Creates XID+ prior.
-
-    Combination of ``prior_processing.ipynb`` and ``xid_hier.ipynb`` from
-    James. For each band creates three pickle files:
-     - Master_prior: contains the prior object alongside a list of all the 
-        small tiles;
-     - Tiles: contains a list of all the small and large tiles;
-     - Tile_X: contains the prior object of a large tile, selected via 
-        ``large_tile_index``.
-    
-    Args:
-        prior_name (str):
-            Run name, determines name of output file.
-        map_choice (str):
-            Choice of map to use.
-        catalogue_choice (str):
-            Choice of catalogue to use as positional/flux priors.
-            The catalogue must include the bands which are being modelled.
-        bands (list of str):
-            List of bands being modelled.
-        order (int):
-            HEALPix order of small tile.
-        order_large (int):
-            HEALPix order of large tile.
-        index_large_tile (int):
-            Index of large tile (from a list of all large tiles to map the
-            field).
-        psf_kernels (list of np.ndarray):
-            List of 2D arrays that define the beam for each band.
-        cirrus_intensity (float):
-            Cirrus intensity (I100) in MJy/sr.
-        mf_kernels (None or list of np.ndarray):
-            List of matched filters to apply to the maps.
-    """
-    from time import time
-
-    tstart = time()
-
-    if photutils_bkgsubtract and nebuliser_bkgsubtract:
-        raise ValueError("Can't have both photutils and nebuliser bkg subtraction.")
-
-    # if mf_kernels is not None:
-    #     if len(psf_kernels) != len(mf_kernels):
-    #         raise ValueError("matched_filter must be either None or same length as psf_kernel")
-
-    print(f"Creating {prior_name = } with {map_choice = } map and {catalogue_choice = } cat.", flush = True)
-
-    ### Select prior catalogue
-    prior_dir = "prima_cats/"
-    if catalogue_choice == "deep1": # DEEP (>1uJy)
-        prior_cat = "pySIDES_PRIMA.fits"
-        fcat = Table.read(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat.to_pandas().query("SPRIMA_1A_1 > 1e-6"))
-    elif catalogue_choice == "deep1_coadd": # DEEP (>1uJy)
-        fcat = Table.read("../sides/outputs/cat/PRIMAv2_coadd.fits") 
-        cat = Table.from_pandas(fcat.to_pandas().query("SPRIMA_1A_1_coadd > 1e-6"))
-    elif catalogue_choice == "deep5": # DEEP (>5uJy)
-        prior_cat = "pySIDES_PRIMA.fits"
-        fcat = Table.read(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat.to_pandas().query("SPRIMA_1A_1 > 5e-6"))
-    elif catalogue_choice == "deep5_coadd": # DEEP (51uJy)
-        fcat = Table.read("../sides/outputs/cat/PRIMAv2_coadd.fits") 
-        cat = Table.from_pandas(fcat.to_pandas().query("SPRIMA_1A_1_coadd > 5e-6"))
-    elif catalogue_choice == "radio":
-        prior_cat = "pySIDES_withradio.fits"
-        fcat = Table.read(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat.to_pandas().query("S1p4GHz_true_y > 0.2"))
-    elif catalogue_choice == "roman_deep":
-        prior_cat = "Roman_XID+priors.fits"
-        fcat = Table.read(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat.to_pandas().query("predict_1B_1_flux >= 2.9e-6")) # is this sorted to also be detected by roman? need to check
-    elif catalogue_choice == "blind_v1_SN_2p5":
-        prior_cat = "blind_merged_SN_2p5_v1.csv"
-        fcat = pd.read_csv(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat)
-    elif catalogue_choice == "blind_v1_SN_5":
-        prior_cat = "blind_merged_SN_5_v1.csv"
-        fcat = pd.read_csv(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat)
-    elif catalogue_choice == "blind_v1_p95":
-        prior_cat = "blind_merged_DECON_p95.csv"
-        fcat = pd.read_csv(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat)
-    elif catalogue_choice == "blind_v1_p95_onlycross":
-        prior_cat = "blind_merged_DECON_p95_ONLYCROSS.csv"
-        fcat = pd.read_csv(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat)
-    elif catalogue_choice == "PRIMAv1_blind_james":
-        prior_cat = "joined_full_w_first_detected_centroid.fits"
-        fcat = Table.read(prior_dir + prior_cat) 
-        cat = fcat
-    elif catalogue_choice == "PRIMAv1_blind_james_FIXED":
-        prior_cat = "joined_full_w_first_detected_centroid_FIXED.fits"
-        fcat = Table.read(prior_dir + prior_cat) 
-        cat = fcat
-    elif catalogue_choice == "blind_v1_wiener_new_onlycross":
-        prior_cat = "blind_merged_v1_wiener_p95_full_new_onlycross.csv"
-        fcat = pd.read_csv(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat)
-    elif catalogue_choice == "blind_v1_wiener_new":
-        prior_cat = "blind_merged_v1_wiener_p95_full_new.csv"
-        fcat = pd.read_csv(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat)
-    elif catalogue_choice == "blind_v2.2_wiener":
-        prior_cat = "blind_merged_v2.2_wiener_p95.csv"
-        fcat = pd.read_csv(prior_dir + prior_cat) 
-        cat = Table.from_pandas(fcat)
-    elif catalogue_choice == "euclid_wide":
-        prior_cat = "PRIMAv2.2_coadd.fits"
-        fcat = Table.read(prior_dir + prior_cat) 
-        fcat = euclid_mass_cut(fcat, "wide")
-        cat = fcat
-    elif catalogue_choice == "euclid_deep":
-        prior_cat = "PRIMAv2.2_coadd.fits"
-        fcat = Table.read(prior_dir + prior_cat) 
-        fcat = euclid_mass_cut(fcat, "deep")
-        cat = fcat
-    elif catalogue_choice == "TESTeuclid_wide":
-        prior_cat = "euclid_wide.fits"
-        fcat = Table.read(prior_cat) 
-        cat = fcat    
-    else:
-        raise ValueError("prior_choice not recognised.")
-
-    print(f"Prior catalogue contains {len(cat)} sources.", flush = True)
-
-    # For sources with no true flux (quiescent), change from 0 to 1e-12 Jy.
-    for band in bands:
-        col = cat[f"S{band}"]
-        cat[f"S{band}"] = np.where(col == 0, 1e-12, col)
-
-    inra = cat["ra"]
-    indec = cat["dec"]
-    # inra = cat["first_detected_ra_centroid"]
-    # indec = cat["first_detected_dec_centroid"]
-
-    ### Select map
-    if map_choice == "v1":
-        noisy_maps = [f"../sides/outputs/maps/v1/noisy/pySIDES_PRIMAv1_{band}_noisy_Jy_beam.fits" for band in bands]
-        npps = pd.read_csv("../sides/inputs/PRIMAgerv1.txt").query("band in @bands").npp_Jy.tolist()
-    elif map_choice == "v2.1":
-        noisy_maps = [f"../sides/outputs/maps/v2/2.1/coadd_noisy/pySIDES_PRIMAv2.1_{band}_noisy_Jy_beam.fits" for band in bands]
-        npps = pd.read_csv("../sides/inputs/PRIMAgerv2.1_coadd.txt").query("band in @bands").npp_Jy.tolist()
-    elif map_choice == "v2.2":
-        noisy_maps = [f"../sides/outputs/maps/v2/2.2/coadd_noisy/pySIDES_PRIMAv2.2_{band}_noisy_Jy_beam.fits" for band in bands]
-        npps = pd.read_csv("../sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
-    elif map_choice == "v2.2_modelled":
-        noisy_maps = [f"../sides/outputs/maps/v2/2.2/modelled/noisy/pySIDES_PRIMAv2.2_modelled_{band}_noisy_Jy_beam.fits" for band in bands]
-        npps = pd.read_csv("../sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
-
-        # What an absolutely horrible way of doing this :/
-        old_areas = [np.sqrt(np.sum(fits.open(f"../sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
-        new_areas = [np.sqrt(np.sum(fits.open(f"../sides/beams/v2/modelled/default/{band}.fits")[0].data**2)) for band in bands]
-        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
-    # elif map_choice == "v2.2_modelledfwhm10":
-    #     noisy_maps = [f"../sides/outputs/maps/v2/2.2/modelledfwhm10/noisy/pySIDES_PRIMAv2.2_modelledfwhm10_{band}_noisy_Jy_beam.fits" for band in bands]
-    #     npps = pd.read_csv("../sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
-    elif map_choice == "v2.2_level2_broadened":
-        noisy_maps = [f"../sides/outputs/maps/v2/2.2/level2_broadened/noisy/pySIDES_PRIMAv2.2_level2_broadened_{band}_noisy_Jy_beam.fits" for band in bands]
-        npps = pd.read_csv("../sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
-
-        # What an absolutely horrible way of doing this :/
-        old_areas = [np.sqrt(np.sum(fits.open(f"../sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
-        new_areas = [np.sqrt(np.sum(fits.open(f"../sides/beams/v2/level2_broadened/{band}.fits")[0].data**2)) for band in bands]
-        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
-    elif map_choice == "v2.2_positionaloffset_broadened":
-        noisy_maps = [f"../sides/outputs/maps/v2/2.2/positionaloffset_broadened/noisy/pySIDES_PRIMAv2.2_positionaloffset_broadened_{band}_noisy_Jy_beam.fits" for band in bands]
-        npps = pd.read_csv("../sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
-
-        # What an absolutely horrible way of doing this :/
-        old_areas = [np.sqrt(np.sum(fits.open(f"../sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
-        new_areas = [np.sqrt(np.sum(fits.open(f"../sides/beams/v2/positionaloffset_broadened/{band}.fits")[0].data**2)) for band in bands]
-        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
-    else:
-        raise ValueError("map_choice not recognised.")
-
-    ### Create list of priors
-    priors = []
-    print("Starting prior creation...", flush = True)
-    for i, band in enumerate(bands):
-        # Get image and error maps
-        hdul = fits.open(noisy_maps[i])
-        im = hdul[0].data
-        header = hdul[0].header
-        hdul.close()
-
-        # Add cirrus (TODO: change cirrus dir?)
-        if cirrus_intensity != 0 and cirrus_intensity != None:
-            print("Adding cirrus.", flush = True)
-            try:
-                cirrus_im = np.load(f"../cirrus/cirrus_pipeline/{band}_v2.npy")
-                im += cirrus_im * cirrus_intensity
-            except IOError:
-                raise IOError("Cirrus map at given band does not exist.")
-
-        # Convert to mJy
-        im *= 1e3
-        im -= np.mean(im)
-        error_im = np.full_like(im, npps[i] * 1e3)
-        
-        # Beam
-        psf = psf_kernels[i]
-
-        # Matched filter
-        if photutils_bkgsubtract:
-            print("Applying the matched filter.", flush = True)
-            # mf = mf_kernels[i]
-
-            from astropy.stats import SigmaClip
-            from photutils.background import Background2D, MedianBackground
-            sigma_clip = SigmaClip(sigma=3.0)
-            bkg_estimator = MedianBackground()
-
-            if "1B" in band:
-                mean_shape = (15,15)
-            else:
-                mean_shape = (25,25)
-
-            bkg = Background2D(im, mean_shape, filter_size=(3, 3),
-                            sigma_clip=sigma_clip, bkg_estimator=bkg_estimator)
-
-            im -= bkg.background
-            # im = conv.convolve_fft(im, mf,
-            #                        boundary = "wrap",
-            #                        normalize_kernel = False,
-            #                        nan_treatment = "fill")
-
-            # psf = conv.convolve_fft(psf, mf,
-            #                         boundary = "wrap",
-            #                         normalize_kernel = False,
-            #                         nan_treatment = "fill")
-        
-        if annulus_bkgsubtract:
-            print("beginning annulus subtraction", flush = True)
-            if "2A" in band:
-                fwhm = int(10.82/2.3)
-            elif "2B" in band:
-                fwhm = int(14.79/2.3)
-            elif "2C" in band:
-                fwhm = int(21.43/2.3)
-            elif "2D" in band:
-                fwhm = int(27.5/2.3)
-            else:
-                raise ValueError("Annulus is not set up for PHI bands yet.")
-
-            im = annular_median_map(im, 2*fwhm, 6*fwhm)
-
-        if nebuliser_bkgsubtract:
-            print("beginning fake nebuliser subtraction", flush = True)
-
-            # if "1B" in band:
-            #     N = 133
-            # else:
-            #     N = 75
-            bkg = estimate_background(im, N=nebuliser_n)
-            im -= bkg
-
-        # Initialise prior
-        influx_mu = cat[f"S{band}"] * 1e3
-        influx_sigma = cat[f"S{band}"] * 1e3
-
-        prior = xidplus.prior(im, error_im, header, header)
-        prior.stepwise_prima_prior_cat(inra, indec, cat, flux_mu = influx_mu, flux_sigma = influx_sigma)
-        prior.prior_bkg(0., 5.)
-
-        pind = np.arange(0, psf.shape[0], 1)
-    
-        prior.set_prf(psf, pind, pind) # requires PRF as 2d grid, and x and y bins for grid (in pixel scale)
-        priors.append(prior)
-        
-        print(f"Finished {band} prior.", flush = True)
-
-
-    # TODO: realistically these few lines could be move to the very top (before prior creation) and then
-    # each loop can be making both the priors and the files without having two for loops
-    ### Create pickle files..
-    tiles = moc_routines.get_HEALPix_pixels(order, inra, indec, unique = True)
-    tiles_large = moc_routines.get_HEALPix_pixels(order_large, inra, indec, unique = True)
-    # print(tiles_large, tiles_large[0])
-
-    index_large_tile = np.where(tiles_large == id_large_tile)[0][0] + 1
-    # print(index_large_tile)
-    print(f"----- There are {len(tiles)} tiles required for input catalogue and {len(tiles_large)} large tiles.", flush = True)
-
-    for i, band in enumerate(bands):
-        output_folder = f"prior_processing_output/{band}/"
-        if not os.path.isdir(output_folder):
-            os.makedirs(output_folder)
-
-        # Master prior
-        outfile_master = f"{output_folder}{prior_name}_Master_prior.pkl"
-        with open(outfile_master, "wb") as f:
-            pickle.dump({"priors": priors[i], "tiles": tiles, "order": order, "version": xidplus.io.git_version()}, f)
-
-        # Tiles
-        outfile_tiles = f"{output_folder}{prior_name}_Tiles.pkl"
-        with open(outfile_tiles, "wb") as f:
-            pickle.dump({"tiles": tiles, "order": order, "tiles_large": tiles_large, "order_large": order_large, "version": xidplus.io.git_version()}, f)
-
-        # Individual large tile
-        HPC.hierarchical_tile_single(outfile_master, outfile_tiles, band, prior_name, index_large_tile)
-        print(f"Created {band} files.", flush = True)
-
-    tstop = time()
-    print(f"Prior created: {tstop - tstart:.3f} s", flush = True)
-
 ### Main XID+ functions
 
-# Added a bunch of function to make it less horrible
 def xid_prior(
     prior_name: str,
     map_choice: str,
@@ -375,14 +52,13 @@ def xid_prior(
     """
     Creates XID+ prior.
 
-    Combination of ``prior_processing.ipynb`` and ``xid_hier.ipynb`` from
-    James. For each band creates three pickle files:
-     - Master_prior: contains the prior object alongside a list of all the 
+    For each band creates three pickle files:
+     - `Master_prior`: contains the prior object alongside a list of all the 
         small tiles;
-     - Tiles: contains a list of all the small and large tiles;
-     - Tile_X: contains the prior object of the large tile, selected via 
-        ``id_large_tile``.
-    
+     - `Tiles`: contains a list of all the small and large tiles;
+     - `Tile_X`: contains the prior object of the large tile, selected via 
+        `id_large_tile`.
+
     Args:
         prior_name (str):
             Run name, determines name of output file.
@@ -511,7 +187,8 @@ def run_XID_modelling(
     order: int,
     order_large: int,
     id_large_tile: int,
-    flux_prior: Optional[float],
+    flux_prior: None|float,
+    flux_stepwise: bool = False,
     output_path = None,
     cirrus_structure_path = None,
     num_samples = 500,
@@ -525,23 +202,43 @@ def run_XID_modelling(
     ``run_xid.ipynb`` from James.
     
     Args:
-        prior_name:
+        prior_name (str):
             Name of the prior to be used. There needs to be prior created
             with this name.
-        output_name:
+        output_name (str):
             Name of output file.
-        job_array_num:
-            SLURM array job number, specifies both band and small tile.
-        order:
+        job_array_num (int):
+            SLURM array job number. Encodes both band and small tile index.
+        order (int):
             HEALPix order of small tile.
-        order_large:
-            HEALPix order of large tile.
-        id_large_tile:
+        order_large (int):
+            HEALPix order of large tile. Must be less or equal to `order`.
+        id_large_tile (int):
             HEALPix ID of large tile.
-        flux_prior:
-            Flux knowledge to use in modelling. If ``None`` uses a flat prior.
-            Otherwise it's the factor between the true flux and the stdev of
-            the prior. st dev / true flux = factor
+        flux_prior (None or float):
+            Flux knowledge to use in modelling. If `None` uses a flat prior.
+            Otherwise sets the scale factor applied to the mean and width of
+            the Gaussian flux prior.
+        flux_stepwise (bool):
+            Whether to use stepwise methodology in the modelling. If `True`,
+            there needs to be a prior at the previous band already run, except
+            for the first band.
+        output_path (Path or str or None):
+            Path to output directory. Results are saved in `output_path / output_name`.
+            Defaults to `lustre_path_xid / "xid_outputs" / output_name`.
+        cirrus_structure_path (Path or str or None):
+            Path to input cirrus structure array. Defaults to inside lustre.
+            If `None` or `False`, does not perform cirrus modelling.
+        num_samples (int):
+            Number of samples to perform in the MCMC modelling.
+        num_warmup (int):
+            Number of warmup steps to perform in the MCMC modelling.
+        num_chains (int):
+            Number of chains to run in the MCMC modelling. 
+        chain_method (str):
+            Paralisation method in numpyro.
+        output (bool):
+            Whether to output the modelling results.
     """
     from time import time
     
@@ -552,21 +249,27 @@ def run_XID_modelling(
             outfolder = Path(output_path) / output_name
         else:
             outfolder = outfolder / output_name
+
+    # happened one too many time :/
+    if chain_method == "vectorised":
+        chain_method = "vectorized"
+        
     print(f"Using {prior_name} prior.", flush = True)
     print(f"Saving as {output_name}.")
 
     bands = ["PRIMA_1A_1", "PRIMA_1A_2", "PRIMA_1A_3", "PRIMA_1A_4", "PRIMA_1A_5", "PRIMA_1A_6",
             "PRIMA_1B_1", "PRIMA_1B_2", "PRIMA_1B_3", "PRIMA_1B_4", "PRIMA_1B_5", "PRIMA_1B_6",
             "PRIMA_2A", "PRIMA_2B", "PRIMA_2C", "PRIMA_2D"]
-    
     bands = [f"{band}_coadd" for band in bands]
+    
     # Defines how many small tiles there are in a large tile
     # Used alongside job_array_num to get band and small tile
     small_tiles_per_large = int(4**(order - order_large))
 
-    band = bands[int(job_array_num/small_tiles_per_large)]
+    index_band = int(job_array_num/small_tiles_per_large)
     index_tile = job_array_num%small_tiles_per_large
 
+    band = bands[index_band]
     print(f"Band: {band}; Tile: {index_tile}.")
 
     ### Prepare small tile prior
@@ -586,6 +289,8 @@ def run_XID_modelling(
             tile_mask[itile] = True
     tiles = all_tiles[tile_mask]
     
+    id_small_tile = tiles[index_tile]
+
     # Load Prior object for large tile
     infile = input_folder / f"{prior_name}_Tile_{id_large_tile}_{order_large}.pkl"
     with open(infile, "rb") as f:
@@ -593,14 +298,12 @@ def run_XID_modelling(
     prior = obj["priors"]
     
     # Trim prior to small tile area
-    moc = moc_routines.get_fitting_region(order, tiles[index_tile])
+    moc = moc_routines.get_fitting_region(order, id_small_tile)
     prior.moc = moc
     prior.cut_down_prior()
 
-    # essentially everything above here is doing the same thing done in HPC.hierarchical_tile_single in the prior function.
-    # Given I never use the numbered tile just
-
     print(f"{prior.nsrc} sources in prior")
+    print(f"{prior.snpix} pixels in prior")
 
     if cirrus_structure_path is None or cirrus_structure_path == False:
         cirrus_map = None
@@ -625,8 +328,34 @@ def run_XID_modelling(
     upper_time = tstop - tstart
     print(f"Upper limits calculated in {upper_time:.3f} s", flush = True)
 
-    print(f"Prior object ready for small tile {tiles[index_tile]}, HEALpix order = {order} (Large Tile {id_large_tile}, HEALpix order = {order_large})")
+    print(f"Prior object ready for small tile {id_small_tile}, HEALpix order = {order} (Large Tile {id_large_tile}, HEALpix order = {order_large})")
     
+
+    if index_band > 0 and flux_stepwise:
+        print("\nLoading previous posterior...")
+        prev_band = bands[index_band - 1]
+
+        prev_posterior_file = outfolder / "posterior" / f"xid_{output_name}_{prev_band}_tile{id_small_tile}_order{order}_large{order_large}_posterior.pkl"
+        
+        with open(prev_posterior_file, "rb") as f:
+            data = pickle.load(f)
+
+            prev_posterior = data["posterior"]
+
+        if index_band < 6:
+            correction_factor = 1.0
+        elif index_band < 12:
+            correction_factor = 1.3
+        else:
+            correction_factor = 2.0
+
+        prior.prior_flux_mu = np.percentile(prev_posterior.samples['src_f'][:,0,:], 50.0, axis=0) * correction_factor
+        prior.prior_flux_sigma = np.percentile(prev_posterior.samples['src_f'][:,0,:], 50.0, axis=0) * correction_factor
+        print("Stepwise ready")
+
+    # Make prior.prior_flux_lower != 0 
+    prior.prior_flux_lower = np.full((prior.sra.shape), 1e-9)
+
     ### Runs numpyro fitting on the small tile
     print("\nStarting modelling", flush = True)
     tstart = time()
@@ -664,13 +393,13 @@ def run_XID_modelling(
         if not os.path.isdir(outfolder_summary):
             os.makedirs(outfolder_summary)
 
-        outfile_prior = outfolder_prior / f"xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}_prior.pkl"
-        outfile_posterior = outfolder_posterior / f"xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}_posterior.pkl"
-        outfile_summary = outfolder_summary / f"xid_{output_name}_{band}_tile{tiles[index_tile]}_order{order}_large{order_large}_summary.csv"
+        outfile_prior = outfolder_prior / f"xid_{output_name}_{band}_tile{id_small_tile}_order{order}_large{order_large}_prior.pkl"
+        outfile_posterior = outfolder_posterior / f"xid_{output_name}_{band}_tile{id_small_tile}_order{order}_large{order_large}_posterior.pkl"
+        outfile_summary = outfolder_summary / f"xid_{output_name}_{band}_tile{id_small_tile}_order{order}_large{order_large}_summary.csv"
 
-        # Mask out sources which were in the modelling due to the tile expansion
-        # but not technically within the small tile.
-        kept_sources = moc_routines.sources_in_tile([tiles[index_tile]],order,prior.sra,prior.sdec)
+        # Mask out sources which were in the modelling due to the tile
+        # expansion but not  within the small tile.
+        kept_sources = moc_routines.sources_in_tile([id_small_tile],order,prior.sra,prior.sdec)
 
         ra = prior.sra[kept_sources]
         dec = prior.sdec[kept_sources]
@@ -716,9 +445,11 @@ def single_model(
     bkg_sig = np.asarray([p.bkg[1] for p in priors]).T
     flux_mu = np.asarray([p.prior_flux_mu for p in priors]).T
     flux_sigma = np.asarray([p.prior_flux_sigma for p in priors]).T
-    # Checked the effect of moving this outside of the function since currently it is being
-    # recreated every sample, but is negligible compared to everything else
 
+    log_flux_lower = np.log(flux_lower)
+    log_flux_upper = np.log(flux_upper)
+    log_flux_mu = np.log(flux_mu)
+    log_flux_sigma = np.sqrt(np.log(1 + (flux_sigma / flux_mu)**2))
 
     with numpyro.plate('bands', len(priors)):
         sigma_conf = numpyro.sample('sigma_conf', dist.HalfCauchy(scale = 0.5))
@@ -730,12 +461,25 @@ def single_model(
             cirrus_scale = numpyro.sample('cirrus_scale', dist.Uniform(0, 100))
 
         with numpyro.plate('nsrc', priors[0].nsrc):
-            if flux_prior is not None and flux_prior != 0:
-                src_f = numpyro.sample('src_f', dist.TruncatedNormal(flux_mu, flux_sigma * flux_prior, low = flux_lower, high = flux_upper))
-            else:
-                src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
 
-    # Modelled map = convolved sources + bkg (+ cirrus)
+            # if flux_prior is not None and flux_prior != 0:
+            #     src_f = numpyro.sample('src_f', dist.TruncatedNormal(flux_mu, flux_sigma * flux_prior, low = flux_lower, high = flux_upper))
+            # else:
+            #     src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
+
+
+            # Transform priors to log-space
+            if flux_prior is not None and flux_prior != 0:
+                log_src_f = numpyro.sample('log_src_f', dist.TruncatedNormal(log_flux_mu, log_flux_sigma * flux_prior, low=log_flux_lower, high=log_flux_upper))
+            else:
+                log_src_f = numpyro.sample('log_src_f', dist.Uniform(log_flux_lower, log_flux_upper)) # This is log uniform now
+
+            # Convert back to linear space for the model
+            src_f = numpyro.deterministic('src_f', jnp.exp(log_src_f))
+
+
+
+    # # Modelled map = convolved sources + bkg (+ cirrus)
     modelled_map = sp_matmul(pointing_matrices[0], src_f[:, 0][:, None], priors[0].snpix).reshape(-1) + bkg[0]
 
     if cirrus_map is not None:
@@ -745,8 +489,8 @@ def single_model(
     # Total noise = sqrt(inst^2 + conf^2)
     sigma_tot = jnp.sqrt(jnp.power(priors[0].snim, 2) + jnp.power(sigma_conf[0], 2))
 
-    with numpyro.plate('psw_pixels', priors[0].snim.size):  # as ind_psw:
-        numpyro.sample("obs_psw", dist.Normal(modelled_map, sigma_tot), obs = priors[0].sim)
+    with numpyro.plate('map_pixels', priors[0].snim.size):
+        numpyro.sample("modelled_map", dist.Normal(modelled_map, sigma_tot), obs = priors[0].sim)
 
 def single_band(
     priors,
@@ -757,15 +501,15 @@ def single_band(
     num_chains = 4,
     chain_method = "parallel"
     ):
-
     if jax.default_backend() == "gpu":
         print("GPU detected, running with GPU.")
         print(f"{jax.device_count()} GPU(s) detected.")
     else:
-        # Assumes if running with CPUs, will have multiple cores
-        # Works for current workflow w HPC but not always
         print("GPU not detected, running with CPU.")
         numpyro.set_host_device_count(num_chains)
+
+    nuts_kernel = NUTS(single_model, init_strategy = numpyro.infer.init_to_median())
+    rng_key = random.PRNGKey(0)
 
     print("\nMODELLING PARAMETERS:")
     print(f"{flux_prior = }")
@@ -775,13 +519,9 @@ def single_band(
     print(f"{num_chains = }")
     print(f"{chain_method = }")
 
-    nuts_kernel = NUTS(single_model, init_strategy = numpyro.infer.init_to_median())
     mcmc = MCMC(nuts_kernel, num_samples = num_samples, num_warmup = num_warmup, num_chains = num_chains, chain_method = chain_method)
-    rng_key = random.PRNGKey(0)
-    # if chain_method == "vectorized" and num_chains > 1:
-    #     rng_key = random.split(rng_key, num_chains)
     mcmc.run(rng_key, priors, flux_prior, cirrus_map, extra_fields = ('potential_energy', 'energy',))
-    # How does this do the progress bar, how to tweak it for slurm :/.
+
     return mcmc
 
 ### Prior helper functions
@@ -1072,10 +812,10 @@ def estimate_background(image, N=30, lower_sigma=-10, upper_sigma=3, iterations=
 def limiting_flux(f_xid, f_true, nbins=50):
     f_ratio = f_xid/f_true
 
-    bmin = min(np.log10(f_true[f_true > 1e-9]))
+    bmin = min(np.log10(f_true))
     bmax = max(np.log10(f_true))
 
-    bmin = -1
+    bmin = -2
     bmax = 2
 
     bstep = (bmax - bmin)/nbins
