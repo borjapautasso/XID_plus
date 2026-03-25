@@ -36,6 +36,8 @@ lustre_path = Path("/mnt/lustre/users/astro/bp259/")
 lustre_path_prima = lustre_path / "prima_data"
 lustre_path_xid = lustre_path_prima / "xid_plus"
 
+research_path = Path("/research/astro/fir/")
+
 ### Main XID+ functions
 
 def xid_prior(
@@ -456,26 +458,25 @@ def single_model(
 
         bkg = numpyro.sample('bkg', dist.Normal(bkg_mu, bkg_sig))
 
-        # probably should just check if not none, no poin for the bool
         if cirrus_map is not None:
             cirrus_scale = numpyro.sample('cirrus_scale', dist.Uniform(0, 100))
 
         with numpyro.plate('nsrc', priors[0].nsrc):
 
-            # if flux_prior is not None and flux_prior != 0:
-            #     src_f = numpyro.sample('src_f', dist.TruncatedNormal(flux_mu, flux_sigma * flux_prior, low = flux_lower, high = flux_upper))
-            # else:
-            #     src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
-
-
-            # Transform priors to log-space
             if flux_prior is not None and flux_prior != 0:
-                log_src_f = numpyro.sample('log_src_f', dist.TruncatedNormal(log_flux_mu, log_flux_sigma * flux_prior, low=log_flux_lower, high=log_flux_upper))
+                src_f = numpyro.sample('src_f', dist.TruncatedNormal(flux_mu, flux_sigma * flux_prior, low = flux_lower, high = flux_upper))
             else:
-                log_src_f = numpyro.sample('log_src_f', dist.Uniform(log_flux_lower, log_flux_upper)) # This is log uniform now
+                src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
 
-            # Convert back to linear space for the model
-            src_f = numpyro.deterministic('src_f', jnp.exp(log_src_f))
+
+            # # Transform flux priors to log-space
+            # if flux_prior is not None and flux_prior != 0:
+            #     log_src_f = numpyro.sample('log_src_f', dist.TruncatedNormal(log_flux_mu, log_flux_sigma * flux_prior, low=log_flux_lower, high=log_flux_upper))
+            # else:
+            #     log_src_f = numpyro.sample('log_src_f', dist.Uniform(log_flux_lower, log_flux_upper)) # This is log uniform now
+
+            # # Convert back to linear space for the model
+            # src_f = numpyro.deterministic('src_f', jnp.exp(log_src_f))
 
 
 
@@ -508,7 +509,7 @@ def single_band(
         print("GPU not detected, running with CPU.")
         numpyro.set_host_device_count(num_chains)
 
-    nuts_kernel = NUTS(single_model, init_strategy = numpyro.infer.init_to_median())
+    nuts_kernel = NUTS(single_model, init_strategy = numpyro.infer.init_to_median(num_samples = 100))
     rng_key = random.PRNGKey(0)
 
     print("\nMODELLING PARAMETERS:")
@@ -620,6 +621,14 @@ def get_map(map_choice, bands):
         old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
         new_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/positionaloffset_broadened/{band}.fits")[0].data**2)) for band in bands]
         npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+    elif map_choice == "v2.2_convolvednoise":
+        noisy_maps = [research_path / f"PRIMA_v2p2_coadd_smoothed_noise_maps/{band}_v2p2_smoothed_noise_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+        # # What an absolutely horrible way of doing this :/
+        # old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
+        # new_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/positionaloffset_broadened/{band}.fits")[0].data**2)) for band in bands]
+        # npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
     else:
         raise ValueError("map_choice not recognised.")
 
@@ -812,8 +821,8 @@ def estimate_background(image, N=30, lower_sigma=-10, upper_sigma=3, iterations=
 def limiting_flux(f_xid, f_true, nbins=50):
     f_ratio = f_xid/f_true
 
-    bmin = min(np.log10(f_true))
-    bmax = max(np.log10(f_true))
+    # bmin = min(np.log10(f_true))
+    # bmax = max(np.log10(f_true))
 
     bmin = -2
     bmax = 2
