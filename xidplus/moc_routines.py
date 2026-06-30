@@ -29,81 +29,20 @@ def get_HEALPix_pixels(order,ra,dec,unique=True):
     else:
         return ipix
 
-def get_fitting_region(order,pixel):
-    """Expand tile by quarter of a pixel for fitting
-
-    
-    :param order: the HEALPix resolution level
-    :param pixel: given HEALPix pixel that needs to be fit
-    :return: HEALPix pixels that need to be fit
+def get_fitting_region(order, pixel, padding_order = 11):
+    """
+    Expand fitting region by a ring of `padding_order` tiles.
     """
 
-    #define old and new order
-    old_nside=2**order
-    new_nside=2**(order+2)
-    # For very large tiles, this is way too much padding. Reduce to cap of a few 9s
-
-    #get co-ord of main pixel
-    theta,phi=pixelfunc.pix2ang(old_nside, pixel, nest=True)
-    #define offsets such that main pixel is split into four sub pixels
-    scale=pixelfunc.max_pixrad(old_nside)
-    offset_theta=np.array([-0.125,0.0,0.125,0.0])*scale
-    offset_phi=np.array([0.0,-0.125,0.0,0.125])*scale
-    #convert co-ords to pixels at higher order
-    pix_fit=pixelfunc.ang2pix(new_nside, theta+offset_theta, phi+offset_phi, nest=True)
-    #get neighbouring pixels and remove duplicates
-    moc_tile=MOC()
-
-    # Add two rings of order+2 tiles (effectively a ring of order+1 tiles) to the MOC.
-
-    pixels=np.unique(pixelfunc.get_all_neighbours(new_nside, pix_fit,nest=True))
-    moc_tile.add(order+2,np.unique(pixelfunc.get_all_neighbours(new_nside, pixels,nest=True)))
-
-    return moc_tile
-
-def get_fitting_region_noexpand(order,pixel, expand_order = 2):
-    """Expand tile by quarter of a pixel for fitting
-
+    if padding_order == 0:
+        moc_tile = MOC()
+        moc_tile.add(order, np.array([pixel]))
+        return moc_tile
     
-    :param order: the HEALPix resolution level
-    :param pixel: given HEALPix pixel that needs to be fit
-    :return: HEALPix pixels that need to be fit
-    """
-
-    old_nside = 2**order
-    new_order = order + expand_order
-    new_nside = 2**new_order
-    
-    # Get theta, phi center of original pixel
-    theta, phi = hp.pix2ang(old_nside, pixel, nest=True)
-    
-    # Find all subpixels of 'pixel' at new_nside inside this pixel
-    # Method: find all pixels at new_nside within pixel at old_nside by checking parents
-    
-    # The number of subpixels per original pixel is 4^expand_order
-    n_subpixels = 4**expand_order
-    
-    # Compute the first subpixel index
-    first_subpixel = pixel * n_subpixels
-    
-    # The subpixels that belong to this pixel are a contiguous block in NESTED ordering
-    subpixels = np.arange(first_subpixel, first_subpixel + n_subpixels)
-    
-    # Create MOC and add these subpixels at new_order
-    moc = MOC()
-    moc.add(new_order, subpixels)
-    
-    return moc
-
-def get_fitting_region_less_padding(order, pixel):
-    """
-    Expand fitting region by a ring of o11 tiles.
-    """
-    PADDING_ORDER = 11
-    padding_nside = 2**PADDING_ORDER
+    padding_nside = 2**padding_order
 
     # Number of order-11 sub-pixels in the original tile
-    level_diff = PADDING_ORDER - order
+    level_diff = padding_order - order
     n_sub = 4**level_diff
 
     # Contiguous block of order-11 sub-pixels (nested scheme)
@@ -117,15 +56,8 @@ def get_fitting_region_less_padding(order, pixel):
     all_pixels = np.unique(np.concatenate([sub_pixels, neighbours]))
 
     moc_tile = MOC()
-    moc_tile.add(PADDING_ORDER, all_pixels)
+    moc_tile.add(padding_order, all_pixels)
 
-    # for order, pixels in moc_tile:
-    #     print(order, pixels)
-
-    # orders, pixels = moc_tile.to_depth_list()
-
-    # print(orders)
-    # print(pixels)
     return moc_tile
 
 def create_MOC_from_map(good,wcs):

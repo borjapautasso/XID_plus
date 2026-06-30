@@ -1,75 +1,66 @@
 #!/bin/bash
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=1
-#SBATCH --mem=8GB
-#SBATCH --gres=gpu:1
-#SBATCH --array=0-255
-#SBATCH --partition=gpu,long,general,short
-#SBATCH --exclude=artemis-a40-[00-03]
+# SBATCH --cpus-per-task=1
+# SBATCH --gres=gpu:1
+# SBATCH --partition=gpu,long,verylong
+# SBATCH --exclude=artemis-a40-[00-03]
+# SBATCH --mem=16GB
+# SBATCH --array=0-95
+# SBATCH --array=0-11,16-27,32-43,48-59,64-75,80-91
+#SBATCH --cpus-per-task=4
+#SBATCH --partition=general,gpu
+#SBATCH --array=704-767
+#SBATCH --mem=16GB
 #SBATCH --output=/mnt/pact/bp259/prima/xid_plus/SLURM_OUTPUTS/modelling/%A/xid-%A_%a.out
 
 
+# EDIT AS NEEDED
+################
 
-# region DEFAULTS (DO NOT TOUCH)
-#######################
-
-flux_stepwise=False
-output_path=None
-cirrus_structure_path=None
-num_samples=500
-num_warmup=500
-num_chains=4
-chain_method="vectorised"
-output=True
-
-#######################
-# endregion
-
-
-
-# region EDIT AS NEEDED
-#######################
-
-prior_name="euclid_wide_v2.2_order9_7"
-output_name="euclid_wide_v2.2_order9_7_Stepwise"
-order=9
+prior_name="euclid_wide_v2.2_order10_7_fwhmexpansion"
+output_name="euclid_wide_v2.2_order10_7_fwhmexpansion_default_CPU"
+order=10
 order_large=7
 id_large_tile=77828
-flux_prior=1
-flux_stepwise=True
-# output_path=None
-# cirrus_structure_path=None
+# flux_prior=None
+# flux_stepwise=0
+# output_path="None"
+# cirrus_structure_path="inputs/fbm_maps/cirrus_2.3_v2.2.npy"
 # num_samples=500
 # num_warmup=500
 # num_chains=4
 # chain_method="vectorised"
 # output=True
-
-#######################
-# endregion
+# expand_fwhm=1
 
 
 model_params=(
-    "$prior_name"
-    "$output_name"
-    "$SLURM_ARRAY_TASK_ID"
-    "$order"
-    "$order_large"
-    "$id_large_tile"
-    "$flux_prior"
-    "$flux_stepwise"
-    "$output_path"
-    "$cirrus_structure_path"
-    "$num_samples"
-    "$num_warmup"
-    "$num_chains"
-    "$chain_method"
-    "$output"
+    "${prior_name}"
+    "${output_name}"
+    "${SLURM_ARRAY_TASK_ID}"
+    "${order}"
+    "${order_large}"
+    "${id_large_tile:=77828}"
+    "${flux_prior:=None}"
+    "${flux_stepwise:=0}"
+    "${output_path:=None}"
+    "${cirrus_structure_path:=None}"
+    "${num_samples:=500}"
+    "${num_warmup:=500}"
+    "${num_chains:=4}"
+    "${chain_method:=parallel}"
+    "${output:=True}"
+    "${expand_fwhm:=0}"
     )
+
 
 #
 # Print which node this is running on
 echo "Running on $SLURM_NODELIST"
+
+if [ -n "$VIRTUAL_ENV" ]; then
+    deactivate
+fi
 
 module purge
 module load Python/3.12
@@ -113,6 +104,4 @@ else
 
 fi
 
-numactl --membind=1,2,5,6 python run_model.py "${model_params[@]}"
-
-# python run_model.py "${model_params[@]}"
+python run_model.py "${model_params[@]}"

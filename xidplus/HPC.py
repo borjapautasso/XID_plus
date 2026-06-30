@@ -81,12 +81,9 @@ def hierarchical_tile_single(masterfile, tilefile, output_folder, catname, index
 
     # The large tile in question
     large_tile = tiles_large[index_large_tile - 1]
-
-    # Original
-    # moc = moc_routines.get_fitting_region_bp(order_large, large_tile)
     
     # Less padding
-    moc = moc_routines.get_fitting_region_less_padding(order_large, large_tile)
+    moc = moc_routines.get_fitting_region(order_large, large_tile)
 
     for p in [priors]:
         p.moc = moc

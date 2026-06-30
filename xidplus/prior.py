@@ -2,7 +2,8 @@ import numpy as np
 from astropy import wcs
 from xidplus import moc_routines
 import jax
-
+from astropy.coordinates import SkyCoord
+import astropy.units as u
 
 class prior(object):
     def __init__(self, im, nim, imphdu, imhdu, moc=None):
@@ -120,7 +121,7 @@ class prior(object):
 
         self.cut_down_prior()
 
-    def stepwise_prima_prior_cat(self, ra, dec, prior_cat_file, flux_mu=None, flux_sigma=None, ID=None, moc=None,z_median=None,z_sig=None, prior_mstar=None):
+    def stepwise_prima_prior_cat(self, ra, dec, prior_cat_file, flux_mu=None, flux_sigma=None, ID=None, moc=None,z_median=None,z_sig=None, prior_mstar=None, fwhm=None, sigma_sens=None):
         """Input info for prior catalogue
 
         :param ra: Right ascension (JD2000) of sources
@@ -153,6 +154,8 @@ class prior(object):
         self.prior_flux_upper = np.full((ra.size), 1000.0)
         self.prior_flux_mu = flux_mu
         self.prior_flux_sigma = flux_sigma
+        self.fwhm = fwhm
+        self.sigma_sens = sigma_sens
         # self.prior_z_mu = z_mu
         # self.prior_z_sigma = z_sigma
         if z_median is not None:
@@ -195,23 +198,58 @@ class prior(object):
         self.moc = self.moc.intersection(moc)
         self.cut_down_prior()
 
-    def cut_down_map(self):
+    def cut_down_map(self, expand_fwhm):
         """Cuts down prior class variables associated with the map data to the MOC assigned to the prior class: self.moc
         """
         wcs_temp = wcs.WCS(self.imhdu)
         ra, dec = wcs_temp.wcs_pix2world(self.sx_pix, self.sy_pix, 0)
         ind_map = np.array(moc_routines.check_in_moc(ra, dec, self.moc))
-        # now cut down and flatten maps (default is to use all pixels, running segment will change the values below to pixels within segment)
+
+
+        if expand_fwhm:
+            print(f"Expanding map by {expand_fwhm}FWHM")
+            ### Expand map by HWHM 
+            all_pixels = SkyCoord(ra=ra*u.deg, dec=dec*u.deg)
+            in_moc_pixels = SkyCoord(ra=ra[ind_map]*u.deg, dec=dec[ind_map]*u.deg)
+            
+            # Find all pixels within radius of ANY good pixel
+            fwhm = self.fwhm*u.arcsec
+
+            idx_all, idx_in_moc, ang_sep, _ = in_moc_pixels.search_around_sky(all_pixels, fwhm * expand_fwhm)
+
+            near_mask = np.zeros(len(self.sx_pix), dtype=bool)
+            near_mask[idx_all] = True
+
+            ind_map = ind_map | near_mask
+
         self.sx_pix = self.sx_pix[ind_map]
         self.sy_pix = self.sy_pix[ind_map]
         self.snim = self.snim[ind_map]
         self.sim = self.sim[ind_map]
         self.snpix = sum(ind_map)
 
-    def cut_down_cat(self):
+    def cut_down_cat(self, expand_fwhm):
         """Cuts down prior class variables associated with the catalogue data to the MOC assigned to the prior class: self.moc
         """
         sgood = np.array(moc_routines.check_in_moc(self.sra, self.sdec, self.moc))
+
+        if expand_fwhm:
+            print(f"Expanding cat by {expand_fwhm}FWHM")
+            ### Expand catalogue by HWHM (a further HWHM than the map already woudl've been) 
+            all_sources = SkyCoord(ra=self.sra*u.deg, dec=self.sdec*u.deg)
+
+            wcs_temp = wcs.WCS(self.imhdu)
+            map_ra, map_dec = wcs_temp.wcs_pix2world(self.sx_pix, self.sy_pix, 0)
+            map_pixels = SkyCoord(ra=map_ra*u.deg, dec=map_dec*u.deg)
+
+            fwhm = self.fwhm*u.arcsec
+
+            idx_all, idx_map, ang_sep, _ = map_pixels.search_around_sky(all_sources, fwhm * expand_fwhm)
+
+            near_mask = np.zeros(len(self.sra), dtype=bool)
+            near_mask[idx_all] = True
+
+            sgood = sgood | near_mask
 
         self.sx = self.sx[sgood]
         self.sy = self.sy[sgood]
@@ -234,16 +272,20 @@ class prior(object):
             self.z_median=self.z_median[sgood]
             self.z_sig=self.z_sig[sgood]
 
-    def cut_down_prior(self):
+    def cut_down_prior(self, expand_fwhm = False):
 
         """
         Cuts down prior class variables to the MOC assigned to the prior class
+
+        Args:
+            expand_fwhm (bool):
+                Whether to expand the map by a FWHM, and the cat by a further FWHM.
         """
-        self.cut_down_map()
-        self.cut_down_cat()
+        self.cut_down_map(expand_fwhm)
+        self.cut_down_cat(expand_fwhm)
 
     def prior_bkg(self, mu, sigma):
-        r"""Add background prior. Assumes :math:`B \sim \mathcal{N}(\mu,\sigma^2)`
+        """Add background prior. Assumes $B \sim \mathcal{N}(\mu,\sigma^2)$
 
         :param mu: mean
         :param sigma: standard deviation

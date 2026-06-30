@@ -15,7 +15,7 @@ import pandas as pd
 import astropy.convolution as conv
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
-from astropy.table import Table
+from astropy.table import Table, join
 
 import jax
 import jax.numpy as jnp
@@ -50,7 +50,10 @@ def xid_prior(
     id_large_tile: int,
     psf_kernels: list[np.ndarray],
     cirrus_intensity: None|float = None,
-    subtraction_type: None|str = None):
+    subtraction_type: None|str = None,
+    fwhms: None|list[float] = None,
+    sigma_sens_list: None|list[float] = None,
+    ):
     """
     Creates XID+ prior.
 
@@ -90,16 +93,16 @@ def xid_prior(
 
     ### Select prior catalogue
     cat: Table = get_catalogue(catalogue_choice)
+
     print(f"Prior catalogue contains {len(cat)} sources.", flush = True)
 
     # For sources with no true flux (e.g. quiescent), change from 0 to 1e-12 Jy.
     for band in bands:
-        col = cat[f"S{band}"]
-        cat[f"S{band}"] = np.where(col == 0, 1e-12, col)
+        cat[f"S{band}"] = np.where(cat[f"S{band}"] == 0, 1e-12, cat[f"S{band}"])
 
+    inid = np.array(cat["ID"])
     inra = np.array(cat["ra"])
     indec = np.array(cat["dec"])
-
     ### Select map
     map_path, npps = get_map(map_choice, bands)
 
@@ -129,7 +132,18 @@ def xid_prior(
         
         # Beam
         psf = psf_kernels[i]
-        
+
+        if fwhms is not None:
+            fwhm = fwhms[i]
+        else:
+            fwhm = None
+
+        if sigma_sens_list is not None:
+            sigma_sens = sigma_sens_list[i]
+        else:
+            sigma_sens = None
+
+
         # Perform background subtraction
         if subtraction_type is not None:
             im = bkg_subtraction(im, subtraction_type, band)
@@ -139,7 +153,12 @@ def xid_prior(
         influx_sigma = np.array(cat[f"S{band}"]) * 1e3
 
         prior = xidplus.prior(im, error_im, header, header)
-        prior.stepwise_prima_prior_cat(inra, indec, cat, flux_mu = influx_mu, flux_sigma = influx_sigma)
+        # prior.stepwise_prima_prior_cat(inra, indec, cat, flux_mu = influx_mu, flux_sigma = influx_sigma)
+
+        # Remove cat, duplicating it at every step??
+        prior.stepwise_prima_prior_cat(inra, indec, None,
+                                       flux_mu = influx_mu, flux_sigma = influx_sigma,
+                                       ID = inid, fwhm = fwhm, sigma_sens = sigma_sens)
         prior.prior_bkg(0., 5.)
 
         pind = np.arange(0, psf.shape[0], 1)
@@ -197,7 +216,8 @@ def run_XID_modelling(
     num_warmup = 500,
     num_chains = 4,
     chain_method = "parallel",
-    output: bool = True
+    output: bool = True,
+    expand_fwhm = False
     ):
     """
     Runs XID+ through the HPC via array jobs. Alongside a general rewrite of
@@ -221,10 +241,11 @@ def run_XID_modelling(
             Flux knowledge to use in modelling. If `None` uses a flat prior.
             Otherwise sets the scale factor applied to the mean and width of
             the Gaussian flux prior.
-        flux_stepwise (bool):
-            Whether to use stepwise methodology in the modelling. If `True`,
-            there needs to be a prior at the previous band already run, except
-            for the first band.
+        flux_stepwise (int):
+            Whether to use stepwise methodology in the modelling.
+            If 0, no stepwise
+            If 1, stepwise for >1a1
+            if 2, stepwise for >=1a1
         output_path (Path or str or None):
             Path to output directory. Results are saved in `output_path / output_name`.
             Defaults to `lustre_path_xid / "xid_outputs" / output_name`.
@@ -250,7 +271,7 @@ def run_XID_modelling(
         if not isinstance(output_path, Path):
             outfolder = Path(output_path) / output_name
         else:
-            outfolder = outfolder / output_name
+            outfolder = output_path / output_name
 
     # happened one too many time :/
     if chain_method == "vectorised":
@@ -275,6 +296,11 @@ def run_XID_modelling(
     print(f"Band: {band}; Tile: {index_tile}.")
 
     ### Prepare small tile prior
+    tstart = time()
+    # prior.get_pointing_matrix()
+    # 
+    # pointing_time = tstop - tstart
+    # print(f"Pointing matrix calculated in {pointing_time:.3f} s", flush = True)
     input_folder = lustre_path_xid / "prior_processing_output" / band
 
     # Get the list of all small tile IDs
@@ -299,13 +325,31 @@ def run_XID_modelling(
         obj = pickle.load(f)
     prior = obj["priors"]
     
-    # Trim prior to small tile area
-    moc = moc_routines.get_fitting_region(order, id_small_tile)
-    prior.moc = moc
-    prior.cut_down_prior()
+    # Trim map to small tile area + ring
+    if expand_fwhm:
+        moc = moc_routines.get_fitting_region(order, id_small_tile, 0)
+        prior.moc = moc
+        prior.cut_down_prior(expand_fwhm)
+    else:
+        moc = moc_routines.get_fitting_region(order, id_small_tile, order+2 if order >= 9 else 11)
+        prior.moc = moc
+        prior.cut_down_prior() # DOING THIS WAY ALSO DOESNT CAUSE ISSUE WITH PRIORS TAHT WERENT GENERATED WITH THE FWHM AND EXPAND PARAMS
+
+    tstop = time()
+    prior_time = tstop - tstart
+    print(f"Prior loaded in {prior_time:.3f} s", flush = True)
+    # # Trim map to small tile area + ring
+    # moc = moc_routines.get_fitting_region(order, id_small_tile, order+2)
+    # prior.moc = moc
+    # prior.cut_down_map()
+
+    # # Trim catalogue to small tile area + ring
+    # moc = moc_routines.get_fitting_region(order, id_small_tile, order+2)
+    # prior.moc = moc
+    # prior.cut_down_cat()
 
     print(f"{prior.nsrc} sources in prior")
-    print(f"{prior.snpix} pixels in prior")
+    print(f"{prior.snpix} pixels in prior", flush = True)
 
     if cirrus_structure_path is None or cirrus_structure_path == False:
         cirrus_map = None
@@ -332,30 +376,62 @@ def run_XID_modelling(
 
     print(f"Prior object ready for small tile {id_small_tile}, HEALpix order = {order} (Large Tile {id_large_tile}, HEALpix order = {order_large})")
     
+    prior.prior_true_flux = prior.prior_flux_mu.copy()
+    
+    # Set 1A_1 prior to 0 (i.e. uniform) when doing stepwise for band > 1A_1 (with uniform 25um)
+    if index_band == 0 and flux_stepwise == 1:
+        flux_prior = 0 
+        print(f"\nRunning {band} with uniform flux prior")
 
-    if index_band > 0 and flux_stepwise:
+    elif index_band > 0 and flux_stepwise != 0:
+        tstart = time()
         print("\nLoading previous posterior...")
         prev_band = bands[index_band - 1]
 
-        prev_posterior_file = outfolder / "posterior" / f"xid_{output_name}_{prev_band}_tile{id_small_tile}_order{order}_large{order_large}_posterior.pkl"
-        
-        with open(prev_posterior_file, "rb") as f:
-            data = pickle.load(f)
+        # prev_posterior_file = outfolder / "posterior" / f"xid_{output_name}_{prev_band}_tile{id_small_tile}_order{order}_large{order_large}_posterior.pkl"
+        # with open(prev_posterior_file, "rb") as f:
+        #     data = pickle.load(f)
+        #     prev_posterior = data["posterior"]
+        # prev_median = np.percentile(prev_posterior.samples['src_f'][:,0,:], 50.0, axis=0)
 
-            prev_posterior = data["posterior"]
+        # No longer doing it on a tile by tile, what with the different expansions for different bands
+        merged_file = outfolder / "summary" / f"merged_xid_{output_name}_{prev_band}_{id_large_tile}.csv"
+        merged = pd.read_csv(merged_file).set_index("ID")
 
-        if index_band < 6:
+        # This breaks if theres a missing source (from tiles in the edge of the o7, as you progress through the band the prior includes more and more flux)
+        # prev_median = merged.loc[prior.ID, "f_xid"].values
+
+        # TODO: Explicitly check its sources outside of the o7, although I think that is the only way it would happen
+
+
+        prev_median = merged.reindex(prior.ID)["f_xid"].values.copy()
+        prev_sigma = prev_median.copy()
+
+        missing = np.isnan(prev_median)
+        if np.any(missing):
+            print(f"WARNING: {np.sum(missing)} sources outside o7 tile")
+            prev_median[missing] = 1.
+            prev_sigma[missing] = 100.
+
+        if index_band < 6 or index_band == 15:
             correction_factor = 1.0
         elif index_band < 12:
             correction_factor = 1.3
         else:
             correction_factor = 2.0
 
-        prior.prior_flux_mu = np.percentile(prev_posterior.samples['src_f'][:,0,:], 50.0, axis=0) * correction_factor
-        prior.prior_flux_sigma = np.percentile(prev_posterior.samples['src_f'][:,0,:], 50.0, axis=0) * correction_factor
+        prior.prior_flux_mu = prev_median * correction_factor
+        prior.prior_flux_sigma = prev_sigma * correction_factor
         print("Stepwise ready")
+        tstop = time()
+        stepwise_time = tstop - tstart
+        print(f"Stepwise prepped in {stepwise_time:.3f} s", flush = True)
 
-    # Make prior.prior_flux_lower != 0 
+        print(f"flux_mu min: {np.min(prior.prior_flux_mu)}, contains NaN: {np.any(np.isnan(prior.prior_flux_mu))}, contains zero/neg: {np.any(prior.prior_flux_mu <= 0)}")
+
+
+
+    # # Make prior.prior_flux_lower != 0 (for log modelling, makes no difference otherwise)
     prior.prior_flux_lower = np.full((prior.sra.shape), 1e-9)
 
     ### Runs numpyro fitting on the small tile
@@ -403,9 +479,21 @@ def run_XID_modelling(
         # expansion but not  within the small tile.
         kept_sources = moc_routines.sources_in_tile([id_small_tile],order,prior.sra,prior.sdec)
 
+        src_id = prior.ID[kept_sources]
         ra = prior.sra[kept_sources]
         dec = prior.sdec[kept_sources]
-        f_true = prior.prior_flux_mu[kept_sources]
+
+        f_true = prior.prior_true_flux[kept_sources]
+        # Match by coords bit annoying though should start indexing all SIDES sources tbh
+        # subset = Table()
+        # subset["ra"] = ra
+        # subset["dec"] = dec
+
+        # cat = prior.prior_cat_file
+
+        # cat = join(subset, cat, keys = ["ra", "dec"])
+
+        # f_true = np.array(cat[f"S{band}"]) * 1e3
 
         f_xid = np.percentile(posterior.samples['src_f'][:,0,:], 50.0, axis=0)[kept_sources]
         f_xid_l = np.percentile(posterior.samples['src_f'][:,0,:], 15.9, axis=0)[kept_sources]
@@ -420,12 +508,13 @@ def run_XID_modelling(
                         "kept_sources": kept_sources}, f)
 
 
-        df = pd.DataFrame(data = {"f_true": f_true,
-                                "f_xid": f_xid,
-                                "f_xid_l": f_xid_l,
-                                "f_xid_u": f_xid_u,
-                                "ra": ra,
-                                "dec": dec
+        df = pd.DataFrame(data = {"ID": src_id,
+                                  "f_true": f_true,
+                                  "f_xid": f_xid,
+                                  "f_xid_l": f_xid_l,
+                                  "f_xid_u": f_xid_u,
+                                  "ra": ra,
+                                  "dec": dec
                                 })
             
         df.to_csv(outfile_summary, index = False)
@@ -441,19 +530,20 @@ def single_model(
     ):
 
     pointing_matrices = [([p.amat_row, p.amat_col], p.amat_data) for p in priors]
-    flux_lower = np.asarray([p.prior_flux_lower for p in priors]).T
-    flux_upper = np.asarray([p.prior_flux_upper for p in priors]).T
-    bkg_mu= np.asarray([p.bkg[0] for p in priors]).T
-    bkg_sig = np.asarray([p.bkg[1] for p in priors]).T
-    flux_mu = np.asarray([p.prior_flux_mu for p in priors]).T
-    flux_sigma = np.asarray([p.prior_flux_sigma for p in priors]).T
+    flux_lower = jnp.asarray([p.prior_flux_lower for p in priors]).T
+    flux_upper = jnp.asarray([p.prior_flux_upper for p in priors]).T
+    bkg_mu= jnp.asarray([p.bkg[0] for p in priors]).T
+    bkg_sig = jnp.asarray([p.bkg[1] for p in priors]).T
+    flux_mu = jnp.asarray([p.prior_flux_mu for p in priors]).T
+    flux_sigma = jnp.asarray([p.prior_flux_sigma for p in priors]).T
 
-    log_flux_lower = np.log(flux_lower)
-    log_flux_upper = np.log(flux_upper)
-    log_flux_mu = np.log(flux_mu)
-    log_flux_sigma = np.sqrt(np.log(1 + (flux_sigma / flux_mu)**2))
+    log_flux_lower = jnp.log(flux_lower)
+    log_flux_upper = jnp.log(flux_upper)
+    log_flux_mu = jnp.log(flux_mu)
+    log_flux_sigma = jnp.sqrt(jnp.log(1 + (flux_sigma / flux_mu)**2))
 
     with numpyro.plate('bands', len(priors)):
+        
         sigma_conf = numpyro.sample('sigma_conf', dist.HalfCauchy(scale = 0.5))
 
         bkg = numpyro.sample('bkg', dist.Normal(bkg_mu, bkg_sig))
@@ -463,20 +553,20 @@ def single_model(
 
         with numpyro.plate('nsrc', priors[0].nsrc):
 
-            if flux_prior is not None and flux_prior != 0:
-                src_f = numpyro.sample('src_f', dist.TruncatedNormal(flux_mu, flux_sigma * flux_prior, low = flux_lower, high = flux_upper))
-            else:
-                src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
-
-
-            # # Transform flux priors to log-space
             # if flux_prior is not None and flux_prior != 0:
-            #     log_src_f = numpyro.sample('log_src_f', dist.TruncatedNormal(log_flux_mu, log_flux_sigma * flux_prior, low=log_flux_lower, high=log_flux_upper))
+            #     src_f = numpyro.sample('src_f', dist.TruncatedNormal(flux_mu, flux_sigma * flux_prior, low = flux_lower, high = flux_upper))
             # else:
-            #     log_src_f = numpyro.sample('log_src_f', dist.Uniform(log_flux_lower, log_flux_upper)) # This is log uniform now
+            #     src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
 
-            # # Convert back to linear space for the model
-            # src_f = numpyro.deterministic('src_f', jnp.exp(log_src_f))
+
+            # Transform flux priors to log-space
+            if flux_prior is not None and flux_prior != 0:
+                log_src_f = numpyro.sample('log_src_f', dist.TruncatedNormal(log_flux_mu, log_flux_sigma * flux_prior, low=log_flux_lower, high=log_flux_upper))
+            else:
+                log_src_f = numpyro.sample('log_src_f', dist.Uniform(log_flux_lower, log_flux_upper)) # This is log uniform now
+
+            # Convert back to linear space for the model
+            src_f = numpyro.deterministic('src_f', jnp.exp(log_src_f))
 
 
 
@@ -539,41 +629,52 @@ def get_catalogue(catalogue_choice):
 
     if catalogue_choice == "blind_v2.2_wiener":
         prior_cat = "blind_merged_v2.2_wiener_p95.csv"
-        fcat = pd.read_csv(prior_dir / prior_cat) 
-        cat = Table.from_pandas(fcat)
+        cat = pd.read_csv(prior_dir / prior_cat) 
+        cat = Table.from_pandas(cat)
     elif catalogue_choice == "euclid_wide":
         prior_cat = "PRIMAv2.2_coadd.fits"
-        fcat = Table.read(prior_dir / prior_cat) 
-        fcat = euclid_mass_cut(fcat, "wide")
-        cat = fcat
+
+        # Move away from astropy.Table? Very slow for massive catalogues
+        # cat = fits.open(prior_dir / prior_cat)[1].data
+        # cat = euclid_mass_cut(cat, "wide")
+
+        cat = Table.read(prior_dir / prior_cat) 
+        cat.add_column(np.arange(len(cat)), name="ID", index=0)
+        cat = euclid_mass_cut(cat, "wide")
     elif catalogue_choice == "euclid_deep":
         prior_cat = "PRIMAv2.2_coadd.fits"
-        fcat = Table.read(prior_dir / prior_cat) 
-        fcat = euclid_mass_cut(fcat, "deep")
-        cat = fcat
+        cat = Table.read(prior_dir / prior_cat) 
+        cat = euclid_mass_cut(cat, "deep")
 
     elif catalogue_choice == "euclid_wide_missing":
         prior_cat = "PRIMAv2.2_coadd.fits"
-        fcat = Table.read(prior_dir / prior_cat) 
-        fcat = euclid_mass_cut(fcat, "wide")
+        cat = Table.read(prior_dir / prior_cat) 
+        cat = euclid_mass_cut(cat, "wide")
 
         # Mask 10% of sources with 1A1 flux above 0.1 mJy
 
 
         rng = np.random.default_rng(0)
 
-        idx = np.where(fcat["SPRIMA_1A_1_coadd"] > 0.1e-3)[0]
+        idx = np.where(cat["SPRIMA_1A_1_coadd"] > 0.1e-3)[0]
         n_mask = int(0.25 * len(idx))
         mask_idx = rng.choice(idx, size=n_mask, replace=False)
 
-        final_mask = np.ones(len(fcat), dtype=bool)
+        final_mask = np.ones(len(cat), dtype=bool)
         final_mask[mask_idx] = False
 
-        table_masked = fcat[final_mask]
+        table_masked = cat[final_mask]
 
 
 
         cat = table_masked
+    
+    elif catalogue_choice == "euclid_wide_shark":
+        prior_cat = "shark_2sqdeg.txt"
+        cat = pd.read_csv(lustre_path / "sides" / "shark" / prior_cat) 
+        cat = Table.from_pandas(cat)
+        cat = euclid_mass_cut(cat, "wide_shark")
+
     else:
         raise ValueError("prior_choice not recognised.")
 
@@ -629,6 +730,108 @@ def get_map(map_choice, bands):
         # old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
         # new_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/positionaloffset_broadened/{band}.fits")[0].data**2)) for band in bands]
         # npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+    elif map_choice == "v2.2_shark":
+        noisy_maps = [lustre_path / f"sides/outputs/maps/v2/2.2/shark/noisy/pySIDES_PRIMAv2.2_shark_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+    elif map_choice == "v2.2_MSV2_2.8":
+        noisy_maps = [lustre_path / f"sides/outputs/maps/v2/2.2/MSV2_2.8RMS/coadd_noisy/pySIDES_MSV2_2.8RMS_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+        # What an absolutely horrible way of doing this :/
+        old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
+        new_areas = [np.sqrt(np.sum(fits.open(f"~/prima/sides/20260416_MSV2_Beam_Profiles/2.8_micron_RMS/{band}.fits")[0].data**2)) for band in bands]
+        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+
+    elif map_choice == "v2.2_MSV2_3.7":
+        noisy_maps = [lustre_path / f"sides/outputs/maps/v2/2.2/MSV2_3.7RMS/coadd_noisy/pySIDES_MSV2_3.7RMS_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+        # What an absolutely horrible way of doing this :/
+        old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
+        new_areas = [np.sqrt(np.sum(fits.open(f"~/prima/sides/20260416_MSV2_Beam_Profiles/3.7_micron_RMS/{band}.fits")[0].data**2)) for band in bands]
+        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+
+
+    elif map_choice == "v2.2_MSV2_2.0":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/MSV2_2.0umRMS/coadd_noisy/pySIDES_MSV2_2.0umRMS_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+        # What an absolutely horrible way of doing this :/
+        old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
+        new_areas = [np.sqrt(np.sum(fits.open(f"~/prima/sides/MSV2_beams/2.0_micron_RMS/{band}.fits")[0].data**2)) for band in bands]
+        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+
+    elif map_choice == "v2.2_MSV2_3.1":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/MSV2_3.1umRMS/coadd_noisy/pySIDES_MSV2_3.1umRMS_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+        # What an absolutely horrible way of doing this :/
+        old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
+        new_areas = [np.sqrt(np.sum(fits.open(f"~/prima/sides/MSV2_beams/3.1_micron_RMS/{band}.fits")[0].data**2)) for band in bands]
+        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+
+    elif map_choice == "v2.2_SV_Airy1.275m":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_Airy1.275m/noisy/pySIDES_SV_Airy1.275m_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+        # What an absolutely horrible way of doing this :/
+        old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
+        new_areas = [np.sqrt(np.sum(fits.open(f"~/prima/sides/SV_beams/1.275m/{band}.fits")[0].data**2)) for band in bands]
+        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+    elif map_choice == "v2.2_SV_NominalPixel1.029":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_NominalPixel1.029/noisy/pySIDES_SV_NominalPixel1.029_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+        # # What an absolutely horrible way of doing this :/
+        # old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
+        # new_areas = [np.sqrt(np.sum(fits.open(f"~/prima/sides/SV_beams/1.275m/{band}.fits")[0].data**2)) for band in bands]
+        # npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+    elif map_choice == "v2.2_SV_Airy1.654m":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_Airy1.654m/noisy/pySIDES_SV_Airy1.654m_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+        # What an absolutely horrible way of doing this :/
+        old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
+        new_areas = [np.sqrt(np.sum(fits.open(f"~/prima/sides/SV_beams/1.654m/{band}.fits")[0].data**2)) for band in bands]
+        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+    elif map_choice == "v2.2_SV_NominalPixel1.092":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_NominalPixel1.092/noisy/pySIDES_SV_NominalPixel1.092_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+    elif map_choice == "v2.2_SV_NominalPixel1.131": 
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_NominalPixel1.131/noisy/pySIDES_SV_NominalPixel1.131_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+    elif map_choice == "v2.2_SV_NominalPixel0.897":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_NominalPixel0.897/noisy/pySIDES_SV_NominalPixel0.897_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+    elif map_choice == "v2.2_SV_Airy1.171m":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_Airy1.171m/noisy/pySIDES_SV_Airy1.171m_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
+        # What an absolutely horrible way of doing this :/
+        old_areas = [np.sqrt(np.sum(fits.open(lustre_path / f"sides/beams/v2/coadd/{band}.fits")[0].data**2)) for band in bands]
+        new_areas = [np.sqrt(np.sum(fits.open(f"~/prima/sides/SV_beams/1.171m/{band}.fits")[0].data**2)) for band in bands]
+        npps = [npp*new_area/old_area for npp, old_area, new_area in zip(npps, old_areas, new_areas)]
+    elif map_choice == "v2.2_SV_NominalPixel1.248":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_NominalPixel1.248/noisy/pySIDES_SV_NominalPixel1.248_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+    elif map_choice == "v2.2_SV_NominalPixel1.248Noisy":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_NominalPixel1.248Noisy/noisy/pySIDES_SV_NominalPixel1.248Noisy_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+        npps = [npp*2.43189737392 for npp in npps]
+        print("npp * 2.43189737392")
+    elif map_choice == "v2.2_WideDepth":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/PRIMAv2.2_WideDepth/noisy/pySIDES_PRIMAv2.2_WideDepth_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+        npps = [npp*np.sqrt(10) for npp in npps]
+        print("npp * np.sqrt(10)")
+    elif map_choice == "v2.2_SV_CBEPixel1.029":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_CBEPixel1.029/noisy/pySIDES_SV_CBEPixel1.029_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+    elif map_choice == "v2.2_SV_CBEPixel1.248":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_CBEPixel1.248/noisy/pySIDES_SV_CBEPixel1.248_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+
     else:
         raise ValueError("map_choice not recognised.")
 
@@ -691,8 +894,8 @@ def euclid_mass_cut(cat, survey_type):
     from scipy.optimize import curve_fit
     from scipy.interpolate import interp1d
 
-    if survey_type not in ["wide", "deep"]:
-        raise ValueError("survey_type must be either 'wide' or 'deep'")
+    if survey_type not in ["wide", "deep", "wide_shark"]:
+        raise ValueError("survey_type must be either 'wide', 'deep', or 'wide_shark'")
 
     
 
@@ -712,15 +915,26 @@ def euclid_mass_cut(cat, survey_type):
     high_z_popt, _ = curve_fit(model, euclid_df.z[euclid_df.z > 1.], euclid_df.logM[euclid_df.z > 1.])
     def high_z_func(z, a = high_z_popt[0], b = high_z_popt[1]):
         return a * np.log10(1 + z) + b
+    
+    if "shark" not in survey_type:
+        low_z_cut = np.empty_like(cat["redshift"], dtype = bool)
+        low_z_cut[cat["redshift"] > np.max(euclid_df.z)] = False
+        low_z_cut[cat["redshift"] <= np.max(euclid_df.z)] = np.log10(cat["Mstar"][cat["redshift"] <= np.max(euclid_df.z)]) >= low_z_func(cat["redshift"][cat["redshift"] <= np.max(euclid_df.z)])
 
-    low_z_cut = np.empty_like(cat["redshift"], dtype = bool)
-    low_z_cut[cat["redshift"] > np.max(euclid_df.z)] = False
-    low_z_cut[cat["redshift"] <= np.max(euclid_df.z)] = np.log10(cat["Mstar"][cat["redshift"] <= np.max(euclid_df.z)]) >= low_z_func(cat["redshift"][cat["redshift"] <= np.max(euclid_df.z)])
+
+        high_z_cut = np.empty_like(cat["redshift"], dtype = bool)
+        high_z_cut[cat["redshift"] <= np.max(euclid_df.z)] = False
+        high_z_cut[cat["redshift"] > np.max(euclid_df.z)] = np.log10(cat["Mstar"][cat["redshift"] > np.max(euclid_df.z)]) >= high_z_func(cat["redshift"][cat["redshift"] > np.max(euclid_df.z)])
+
+    else: # Horrible way of doing this but if it works it works
+        low_z_cut = np.empty_like(cat["redshift[cos]"], dtype = bool)
+        low_z_cut[cat["redshift[cos]"] > np.max(euclid_df.z)] = False
+        low_z_cut[cat["redshift[cos]"] <= np.max(euclid_df.z)] = cat["log10(mstar)"][cat["redshift[cos]"] <= np.max(euclid_df.z)] >= low_z_func(cat["redshift[cos]"][cat["redshift[cos]"] <= np.max(euclid_df.z)])
 
 
-    high_z_cut = np.empty_like(cat["redshift"], dtype = bool)
-    high_z_cut[cat["redshift"] <= np.max(euclid_df.z)] = False
-    high_z_cut[cat["redshift"] > np.max(euclid_df.z)] = np.log10(cat["Mstar"][cat["redshift"] > np.max(euclid_df.z)]) >= high_z_func(cat["redshift"][cat["redshift"] > np.max(euclid_df.z)])
+        high_z_cut = np.empty_like(cat["redshift[cos]"], dtype = bool)
+        high_z_cut[cat["redshift[cos]"] <= np.max(euclid_df.z)] = False
+        high_z_cut[cat["redshift[cos]"] > np.max(euclid_df.z)] =cat["log10(mstar)"][cat["redshift[cos]"] > np.max(euclid_df.z)] >= high_z_func(cat["redshift[cos]"][cat["redshift[cos]"] > np.max(euclid_df.z)])
 
     mass_cut = low_z_cut | high_z_cut
 
@@ -853,13 +1067,129 @@ def limiting_flux(f_xid, f_true, nbins=50):
 
 def get_lim(yarr, xarr, counts, lim, min_count = 10):
     if max(yarr) < lim:
-        return min(xarr)
+        return None
     else:
         yarr = yarr[counts > min_count] #mad
         xarr = xarr[counts > min_count] #flux
         gt_lim_1st = yarr[yarr >= lim][-1]
         ind_gt_lim_1st = np.where(yarr == gt_lim_1st)[0][0]
+
         lim_line = yarr[ind_gt_lim_1st:ind_gt_lim_1st+2]
         lim_bins = xarr[ind_gt_lim_1st:ind_gt_lim_1st+2]
         interp = interp1d(lim_line,lim_bins)
-        return interp(lim)
+
+        try:
+            lim_flux = interp(lim)
+            return lim_flux
+        except ValueError:
+            return None
+
+def get_lim_log(yarr, xarr, counts, lim, min_count = 10):
+    if max(yarr) < lim:
+        return min(xarr)
+    else:
+
+        yarr = yarr[counts > min_count] #mad
+        xarr = xarr[counts > min_count] #flux
+
+        xarr, yarr, lim = np.log10(xarr), np.log10(yarr), np.log10(lim)
+
+        gt_lim_1st = yarr[yarr >= lim][-1]
+        ind_gt_lim_1st = np.where(yarr == gt_lim_1st)[0][0]
+        lim_line = yarr[ind_gt_lim_1st:ind_gt_lim_1st+2]
+        lim_bins = xarr[ind_gt_lim_1st:ind_gt_lim_1st+2]
+        interp = interp1d(lim_line,lim_bins)
+        return 10**interp(lim)        
+
+def relative_error(f_xid, f_true, nbins=50):
+    rel_error = (f_xid-f_true)/f_true
+    
+    log_true = np.log10(f_true)
+
+    bmin = -2
+    bmax = 2
+
+    bstep = (bmax - bmin)/nbins
+    bins = np.arange(bmin,bmax+bstep,bstep)
+
+    bin_width = (bins[1] - bins[0])
+    bin_centers = bins[1:] - bin_width/2
+    counts = np.zeros(len(bin_centers))
+
+    medians = np.zeros(len(bin_centers))
+    p5 = np.zeros(len(bin_centers))
+    p16 = np.zeros(len(bin_centers))
+    p84 = np.zeros(len(bin_centers))
+    p95 = np.zeros(len(bin_centers))
+
+    # loop over bins
+    for i in range(len(bin_centers)):
+        mask = (log_true >= bins[i]) & (log_true < bins[i+1])
+
+        if np.any(mask):
+            vals = rel_error[mask]
+
+            counts[i] = len(vals)
+            medians[i] = np.median(vals)
+            p5[i]  = np.percentile(vals, 5)
+            p16[i] = np.percentile(vals, 16)
+            p84[i] = np.percentile(vals, 84)
+            p95[i] = np.percentile(vals, 95)
+
+    return bin_centers, counts, medians, p5, p16, p84, p95
+
+def non_relative_error(f_xid, f_true, nbins=50):
+    diff = f_xid-f_true
+    
+    log_true = np.log10(f_true)
+
+    bmin = -2
+    bmax = 2
+
+    bstep = (bmax - bmin)/nbins
+    bins = np.arange(bmin,bmax+bstep,bstep)
+
+    bin_width = (bins[1] - bins[0])
+    bin_centers = bins[1:] - bin_width/2
+    counts = np.zeros(len(bin_centers))
+
+    medians = np.zeros(len(bin_centers))
+    p5 = np.zeros(len(bin_centers))
+    p16 = np.zeros(len(bin_centers))
+    p84 = np.zeros(len(bin_centers))
+    p95 = np.zeros(len(bin_centers))
+
+    # loop over bins
+    for i in range(len(bin_centers)):
+        mask = (log_true >= bins[i]) & (log_true < bins[i+1])
+
+        if np.any(mask):
+            vals = diff[mask]
+
+            counts[i] = len(vals)
+            medians[i] = np.median(vals)
+            p5[i]  = np.percentile(vals, 5)
+            p16[i] = np.percentile(vals, 16)
+            p84[i] = np.percentile(vals, 84)
+            p95[i] = np.percentile(vals, 95)
+
+    return bin_centers, counts, medians, p5, p16, p84, p95
+
+def bootstrap_limiting_flux(f_xid, f_true, lim_value = 0.2, nboot = 1000, nbins = 50):
+    boot_lims = []
+
+    N = len(f_true)
+
+    for _ in range(nboot):
+        idx = np.random.choice(N, size=N, replace=True)
+
+        f_xid_boot = f_xid[idx]
+        f_true_boot = f_true[idx]
+
+        mad, rms, counts, bins = limiting_flux(f_xid_boot, f_true_boot, nbins=nbins)
+
+        lim_flux = get_lim(mad, np.power(10,bins), counts, lim_value)
+        if lim_flux is not None:
+            boot_lims.append(lim_flux)
+
+    return np.array(boot_lims)
