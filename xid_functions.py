@@ -12,6 +12,8 @@ from typing import Optional, Literal
 import numpy as np
 import pandas as pd
 
+from tqdm import tqdm
+
 import astropy.convolution as conv
 from astropy.io import fits
 from astropy.stats import sigma_clipped_stats
@@ -217,7 +219,10 @@ def run_XID_modelling(
     num_chains = 4,
     chain_method = "parallel",
     output: bool = True,
-    expand_fwhm = False
+    expand_fwhm = False,
+    stepwise_prior_index = None,
+    stepwise_prior_name = None,
+    flux_sampling_space = "linear",
     ):
     """
     Runs XID+ through the HPC via array jobs. Alongside a general rewrite of
@@ -276,7 +281,7 @@ def run_XID_modelling(
     # happened one too many time :/
     if chain_method == "vectorised":
         chain_method = "vectorized"
-        
+
     print(f"Using {prior_name} prior.", flush = True)
     print(f"Saving as {output_name}.")
 
@@ -330,11 +335,12 @@ def run_XID_modelling(
         moc = moc_routines.get_fitting_region(order, id_small_tile, 0)
         prior.moc = moc
         prior.cut_down_prior(expand_fwhm)
+        print(f"Expanding by {expand_fwhm} * FWHM.")
     else:
         moc = moc_routines.get_fitting_region(order, id_small_tile, order+2 if order >= 9 else 11)
         prior.moc = moc
         prior.cut_down_prior() # DOING THIS WAY ALSO DOESNT CAUSE ISSUE WITH PRIORS TAHT WERENT GENERATED WITH THE FWHM AND EXPAND PARAMS
-
+        print(f"Expanding by a HEALPIX order {order+2 if order >= 9 else 11} tile.")
     tstop = time()
     prior_time = tstop - tstart
     print(f"Prior loaded in {prior_time:.3f} s", flush = True)
@@ -388,6 +394,14 @@ def run_XID_modelling(
         print("\nLoading previous posterior...")
         prev_band = bands[index_band - 1]
 
+        if index_band == stepwise_prior_index and stepwise_prior_name is not None:
+            prev_run_name = stepwise_prior_name
+            print(f"Loading {prev_band} outputs from {prev_run_name}")
+        else:
+            prev_run_name = output_name
+
+
+
         # prev_posterior_file = outfolder / "posterior" / f"xid_{output_name}_{prev_band}_tile{id_small_tile}_order{order}_large{order_large}_posterior.pkl"
         # with open(prev_posterior_file, "rb") as f:
         #     data = pickle.load(f)
@@ -395,7 +409,7 @@ def run_XID_modelling(
         # prev_median = np.percentile(prev_posterior.samples['src_f'][:,0,:], 50.0, axis=0)
 
         # No longer doing it on a tile by tile, what with the different expansions for different bands
-        merged_file = outfolder / "summary" / f"merged_xid_{output_name}_{prev_band}_{id_large_tile}.csv"
+        merged_file = lustre_path_xid / "xid_outputs" / prev_run_name / "summary" / f"merged_xid_{prev_run_name}_{prev_band}_{id_large_tile}.csv"
         merged = pd.read_csv(merged_file).set_index("ID")
 
         # This breaks if theres a missing source (from tiles in the edge of the o7, as you progress through the band the prior includes more and more flux)
@@ -427,17 +441,26 @@ def run_XID_modelling(
         stepwise_time = tstop - tstart
         print(f"Stepwise prepped in {stepwise_time:.3f} s", flush = True)
 
-        print(f"flux_mu min: {np.min(prior.prior_flux_mu)}, contains NaN: {np.any(np.isnan(prior.prior_flux_mu))}, contains zero/neg: {np.any(prior.prior_flux_mu <= 0)}")
+        # print(f"flux_mu min: {np.min(prior.prior_flux_mu)}, contains NaN: {np.any(np.isnan(prior.prior_flux_mu))}, contains zero/neg: {np.any(prior.prior_flux_mu <= 0)}")
 
 
 
     # # Make prior.prior_flux_lower != 0 (for log modelling, makes no difference otherwise)
-    prior.prior_flux_lower = np.full((prior.sra.shape), 1e-9)
+    # prior.prior_flux_lower = np.full((prior.sra.shape), 1e-9)
 
+
+    if flux_sampling_space == "log":
+        prior.prior_flux_lower = np.full((prior.sra.shape), prior.sigma_sens/10)
+
+        # Not sure i love this tbh ugh
+
+        prior.prior_flux_mu = np.maximum(prior.prior_flux_mu, prior.prior_flux_lower)
+        prior.prior_flux_sigma = np.maximum(prior.prior_flux_sigma, prior.prior_flux_lower)
+        
     ### Runs numpyro fitting on the small tile
     print("\nStarting modelling", flush = True)
     tstart = time()
-    fit = single_band([prior], flux_prior, cirrus_map, num_samples, num_warmup, num_chains, chain_method)
+    fit = single_band([prior], flux_prior, flux_sampling_space, cirrus_map, num_samples, num_warmup, num_chains, chain_method)
 
     samples = fit.get_samples() # get samples from the fit (not sure if this is needed when using the numpyro method. I think left over)
     posterior = xidplus.posterior.posterior_numpyro(fit, [prior])
@@ -447,6 +470,7 @@ def run_XID_modelling(
     print(f"\nModelling completed in: {model_time:.3f} s", flush = True)
 
     # Diagnostics to check mcmc run correctly, should be 0 for all three
+    # TODO: Should probably check that none of the kept sources have bad diagnostics? this is being a bit conservative right now
     print(np.sum(np.array(posterior.divergences)))
     print(np.sum(posterior.Rhat['src_f'] >= 1.1))
     print(np.sum(posterior.n_eff['src_f']/posterior.samples['src_f'].shape[0] < 0.001))
@@ -477,27 +501,17 @@ def run_XID_modelling(
 
         # Mask out sources which were in the modelling due to the tile
         # expansion but not  within the small tile.
-        kept_sources = moc_routines.sources_in_tile([id_small_tile],order,prior.sra,prior.sdec)
+        central_sources = moc_routines.sources_in_tile([id_small_tile],order,prior.sra,prior.sdec)
 
-        src_id = prior.ID[kept_sources]
-        ra = prior.sra[kept_sources]
-        dec = prior.sdec[kept_sources]
+        src_id = prior.ID
+        ra = prior.sra
+        dec = prior.sdec
 
-        f_true = prior.prior_true_flux[kept_sources]
-        # Match by coords bit annoying though should start indexing all SIDES sources tbh
-        # subset = Table()
-        # subset["ra"] = ra
-        # subset["dec"] = dec
+        f_true = prior.prior_true_flux
 
-        # cat = prior.prior_cat_file
-
-        # cat = join(subset, cat, keys = ["ra", "dec"])
-
-        # f_true = np.array(cat[f"S{band}"]) * 1e3
-
-        f_xid = np.percentile(posterior.samples['src_f'][:,0,:], 50.0, axis=0)[kept_sources]
-        f_xid_l = np.percentile(posterior.samples['src_f'][:,0,:], 15.9, axis=0)[kept_sources]
-        f_xid_u = np.percentile(posterior.samples['src_f'][:,0,:], 84.1, axis=0)[kept_sources]
+        f_xid = np.percentile(posterior.samples['src_f'][:,0,:], 50.0, axis=0)
+        f_xid_l = np.percentile(posterior.samples['src_f'][:,0,:], 15.9, axis=0)
+        f_xid_u = np.percentile(posterior.samples['src_f'][:,0,:], 84.1, axis=0)
 
         ### Output results to pkl
         with open(outfile_prior, "wb") as f:
@@ -505,7 +519,7 @@ def run_XID_modelling(
             
         with open(outfile_posterior, "wb") as f:
             pickle.dump({"posterior": posterior,
-                        "kept_sources": kept_sources}, f)
+                        "kept_sources": central_sources}, f)
 
 
         df = pd.DataFrame(data = {"ID": src_id,
@@ -514,7 +528,8 @@ def run_XID_modelling(
                                   "f_xid_l": f_xid_l,
                                   "f_xid_u": f_xid_u,
                                   "ra": ra,
-                                  "dec": dec
+                                  "dec": dec,
+                                  "is_central": central_sources
                                 })
             
         df.to_csv(outfile_summary, index = False)
@@ -526,21 +541,22 @@ def run_XID_modelling(
 def single_model(
     priors,
     flux_prior: float|None = None,
+    flux_sampling_space: str|None = None,
     cirrus_map: np.ndarray|None = None
     ):
 
     pointing_matrices = [([p.amat_row, p.amat_col], p.amat_data) for p in priors]
-    flux_lower = jnp.asarray([p.prior_flux_lower for p in priors]).T
-    flux_upper = jnp.asarray([p.prior_flux_upper for p in priors]).T
-    bkg_mu= jnp.asarray([p.bkg[0] for p in priors]).T
-    bkg_sig = jnp.asarray([p.bkg[1] for p in priors]).T
-    flux_mu = jnp.asarray([p.prior_flux_mu for p in priors]).T
-    flux_sigma = jnp.asarray([p.prior_flux_sigma for p in priors]).T
+    flux_lower = np.asarray([p.prior_flux_lower for p in priors]).T
+    flux_upper = np.asarray([p.prior_flux_upper for p in priors]).T
+    bkg_mu= np.asarray([p.bkg[0] for p in priors]).T
+    bkg_sig = np.asarray([p.bkg[1] for p in priors]).T
+    flux_mu = np.asarray([p.prior_flux_mu for p in priors]).T
+    flux_sigma = np.asarray([p.prior_flux_sigma for p in priors]).T
 
-    log_flux_lower = jnp.log(flux_lower)
-    log_flux_upper = jnp.log(flux_upper)
-    log_flux_mu = jnp.log(flux_mu)
-    log_flux_sigma = jnp.sqrt(jnp.log(1 + (flux_sigma / flux_mu)**2))
+    log_flux_lower = np.log(flux_lower)
+    log_flux_upper = np.log(flux_upper)
+    log_flux_mu = np.log(flux_mu)
+    log_flux_sigma = np.sqrt(np.log(1 + (flux_sigma / flux_mu)**2))
 
     with numpyro.plate('bands', len(priors)):
         
@@ -552,22 +568,21 @@ def single_model(
             cirrus_scale = numpyro.sample('cirrus_scale', dist.Uniform(0, 100))
 
         with numpyro.plate('nsrc', priors[0].nsrc):
+            if flux_sampling_space == "linear":
+                if flux_prior is not None and flux_prior != 0:
+                    src_f = numpyro.sample('src_f', dist.TruncatedNormal(flux_mu, flux_sigma * flux_prior, low = flux_lower, high = flux_upper))
+                else:
+                    src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
 
-            # if flux_prior is not None and flux_prior != 0:
-            #     src_f = numpyro.sample('src_f', dist.TruncatedNormal(flux_mu, flux_sigma * flux_prior, low = flux_lower, high = flux_upper))
-            # else:
-            #     src_f = numpyro.sample('src_f', dist.Uniform(flux_lower, flux_upper))
-
-
-            # Transform flux priors to log-space
-            if flux_prior is not None and flux_prior != 0:
-                log_src_f = numpyro.sample('log_src_f', dist.TruncatedNormal(log_flux_mu, log_flux_sigma * flux_prior, low=log_flux_lower, high=log_flux_upper))
+            elif flux_sampling_space == "log":
+                if flux_prior is not None and flux_prior != 0:
+                    log_src_f = numpyro.sample('log_src_f', dist.TruncatedNormal(log_flux_mu, log_flux_sigma * flux_prior, low=log_flux_lower, high=log_flux_upper))
+                else:
+                    log_src_f = numpyro.sample('log_src_f', dist.Uniform(log_flux_lower, log_flux_upper)) # This is log uniform now
+                # Convert back to linear space for the model
+                src_f = numpyro.deterministic('src_f', jnp.exp(log_src_f))
             else:
-                log_src_f = numpyro.sample('log_src_f', dist.Uniform(log_flux_lower, log_flux_upper)) # This is log uniform now
-
-            # Convert back to linear space for the model
-            src_f = numpyro.deterministic('src_f', jnp.exp(log_src_f))
-
+                raise ValueError(f"flux_sampling_space must be either 'linear' or 'log' = {flux_sampling_space}")
 
 
     # # Modelled map = convolved sources + bkg (+ cirrus)
@@ -586,6 +601,7 @@ def single_model(
 def single_band(
     priors,
     flux_prior: float|None = None,
+    flux_sampling_space: str|None = None,
     cirrus_map: np.ndarray|None = None,
     num_samples = 500,
     num_warmup = 500,
@@ -595,15 +611,20 @@ def single_band(
     if jax.default_backend() == "gpu":
         print("GPU detected, running with GPU.")
         print(f"{jax.device_count()} GPU(s) detected.")
-    else:
-        print("GPU not detected, running with CPU.")
+    elif chain_method == "parallel":
+        print("GPU not detected, running with CPU in parallel mode.")
+        print(f"Setting # devices to # chains ({num_chains}).")
         numpyro.set_host_device_count(num_chains)
+    else:
+        print(f"GPU not detected, running with CPU in {chain_method} mode.")
+
 
     nuts_kernel = NUTS(single_model, init_strategy = numpyro.infer.init_to_median(num_samples = 100))
     rng_key = random.PRNGKey(0)
 
     print("\nMODELLING PARAMETERS:")
     print(f"{flux_prior = }")
+    print(f"{flux_sampling_space = }")
     print(f"{type(cirrus_map) = }")
     print(f"{num_samples = }")
     print(f"{num_warmup = }")
@@ -611,7 +632,7 @@ def single_band(
     print(f"{chain_method = }")
 
     mcmc = MCMC(nuts_kernel, num_samples = num_samples, num_warmup = num_warmup, num_chains = num_chains, chain_method = chain_method)
-    mcmc.run(rng_key, priors, flux_prior, cirrus_map, extra_fields = ('potential_energy', 'energy',))
+    mcmc.run(rng_key, priors, flux_prior, flux_sampling_space, cirrus_map, extra_fields = ('potential_energy', 'energy',))
 
     return mcmc
 
@@ -631,6 +652,11 @@ def get_catalogue(catalogue_choice):
         prior_cat = "blind_merged_v2.2_wiener_p95.csv"
         cat = pd.read_csv(prior_dir / prior_cat) 
         cat = Table.from_pandas(cat)
+        
+        # THIS ID WILL NOT MATCH THE OTHERS. IT SHOULD BE ADDED AT THE CATALOGUE LEVEL, SOMETHING FOR THE NEXT CATALOGUE VERSION TO FIX
+        cat.add_column(np.arange(len(cat)), name="ID", index=0)
+
+
     elif catalogue_choice == "euclid_wide":
         prior_cat = "PRIMAv2.2_coadd.fits"
 
@@ -644,11 +670,12 @@ def get_catalogue(catalogue_choice):
     elif catalogue_choice == "euclid_deep":
         prior_cat = "PRIMAv2.2_coadd.fits"
         cat = Table.read(prior_dir / prior_cat) 
+        cat.add_column(np.arange(len(cat)), name="ID", index=0)
         cat = euclid_mass_cut(cat, "deep")
 
     elif catalogue_choice == "euclid_wide_missing":
         prior_cat = "PRIMAv2.2_coadd.fits"
-        cat = Table.read(prior_dir / prior_cat) 
+        cat = Table.read(prior_dir / prior_cat)
         cat = euclid_mass_cut(cat, "wide")
 
         # Mask 10% of sources with 1A1 flux above 0.1 mJy
@@ -1193,3 +1220,173 @@ def bootstrap_limiting_flux(f_xid, f_true, lim_value = 0.2, nboot = 1000, nbins 
             boot_lims.append(lim_flux)
 
     return np.array(boot_lims)
+
+def continuous_limiting_flux(f_xid, f_true, dlogflux=0.1, npoints=200):
+
+    f_ratio = f_xid / f_true
+    logf = np.log10(f_true)
+
+    log_grid = np.linspace(-2, 2, npoints)
+
+    mad = np.zeros_like(log_grid)
+    rms = np.zeros_like(log_grid)
+    counts = np.zeros_like(log_grid)
+
+    for i, lg in enumerate(log_grid):
+
+        mask = np.abs(logf - lg) <= dlogflux
+
+        y = f_ratio[mask]
+
+        counts[i] = len(y)
+
+        if len(y) > 0:
+            mad[i] = 1.4826 * np.percentile(
+                np.abs(y - np.percentile(y,50)), 
+                50
+            )
+
+            rms[i] = np.sqrt(np.mean((y-1)**2))
+
+        else:
+            mad[i] = np.nan
+            rms[i] = np.nan
+
+    return mad, rms, counts, log_grid
+
+def bootstrap_continuous(f_xid, f_true, nboot=1000):
+
+    all_mads = []
+    all_lims = []
+
+    N = len(f_true)
+
+    for _ in tqdm(range(nboot)):
+    # for _ in range(nboot):
+
+        idx = np.random.choice(N, N, replace=True)
+
+        mad, rms, counts, loggrid = continuous_limiting_flux(f_xid[idx], f_true[idx])
+
+        all_mads.append(mad)
+
+        lim = get_lim(mad, 10**loggrid, counts, 0.2)
+
+        if lim is not None:
+            all_lims.append(lim)
+
+    return np.array(all_mads), np.array(all_lims)
+
+
+
+def get_merged_data(run_name, band, ids_large,
+                    order = 11,
+                    order_large = 7,
+                    output_dir = None
+                    ):
+
+    small_tiles_per_large = int(4**(order - order_large))
+
+
+    merged_f_true = np.empty(0)
+    merged_f_xid = np.empty(0)
+    merged_f_xid_l = np.empty(0)
+    merged_f_xid_u = np.empty(0)
+    merged_ra = np.empty(0)
+    merged_dec = np.empty(0)
+
+    for large_tile in ids_large:
+        if len(ids_large) > 1:
+            print(f"Starting large tile {large_tile}")
+
+        large_f_true = np.empty(0)
+        large_f_xid = np.empty(0)
+        large_f_xid_l = np.empty(0)
+        large_f_xid_u = np.empty(0)
+        large_ra = np.empty(0)
+        large_dec = np.empty(0)
+
+        merged_file = f"merged_xid_{run_name}_{band}_{large_tile}.csv"
+        # merged_file = f"merged_xid_{run_name}_{band}.csv" # OLD VERSION
+        merged_path = output_dir / merged_file
+
+        # If merged file exists, load and append to merged arrays without looking for small tiles.
+        if os.path.isfile(merged_path):
+            print("Loading merged file...")
+            df = pd.read_csv(merged_path)
+
+            if "is_central" in df.columns:
+                df = df[df.is_central]
+
+            merged_f_true = np.concatenate((merged_f_true, df.f_true))
+            merged_f_xid = np.concatenate((merged_f_xid, df.f_xid))
+            merged_f_xid_l = np.concatenate((merged_f_xid_l, df.f_xid_l))
+            merged_f_xid_u = np.concatenate((merged_f_xid_u, df.f_xid_u))
+            merged_ra = np.concatenate((merged_ra, df.ra))
+            merged_dec = np.concatenate((merged_dec, df.dec))
+
+            continue
+        
+        num_missing_small = 0 # number of small tiles missing
+
+        for small_tile in tqdm(range(small_tiles_per_large)):
+            small_tile_id = large_tile*small_tiles_per_large + small_tile
+
+            small_file = f"xid_{run_name}_{band}_tile{small_tile_id}_order{order}_large{order_large}_summary.csv"
+            small_path = output_dir / small_file
+
+            # If small tile file exists, load it and append to the merged arrays
+            if os.path.isfile(small_path):
+                df = pd.read_csv(small_path)
+
+                if "is_central" in df.columns:
+                    df = df[df.is_central]
+
+                large_f_true = np.concatenate((large_f_true, df.f_true))
+                large_f_xid = np.concatenate((large_f_xid, df.f_xid))
+                large_f_xid_l = np.concatenate((large_f_xid_l, df.f_xid_l))
+                large_f_xid_u = np.concatenate((large_f_xid_u, df.f_xid_u))
+                large_ra = np.concatenate((large_ra, df.ra))
+                large_dec = np.concatenate((large_dec, df.dec))
+
+                continue
+            
+            # If small tile file doesn't exist, add to missing num
+            num_missing_small += 1
+
+        # If no small files loaded, say so
+        if num_missing_small == small_tiles_per_large:
+            print(f"No data for {large_tile}")
+            continue
+
+        # If all small files loaded, create merged file
+        if num_missing_small == 0:
+            print("Creating merged file...")
+            df = pd.DataFrame(data = {"f_true": large_f_true,
+                                    "f_xid": large_f_xid,
+                                    "f_xid_l": large_f_xid_l,
+                                    "f_xid_u": large_f_xid_u,
+                                    "ra": large_ra,
+                                    "dec": large_dec
+                                    })
+            df.to_csv(merged_path, index = False)
+        else:
+            print(f"Missing {num_missing_small}/{small_tiles_per_large}")
+
+        merged_f_true = np.concatenate((merged_f_true, large_f_true))
+        merged_f_xid = np.concatenate((merged_f_xid, large_f_xid))
+        merged_f_xid_l = np.concatenate((merged_f_xid_l, large_f_xid_l))
+        merged_f_xid_u = np.concatenate((merged_f_xid_u, large_f_xid_u))
+        merged_ra = np.concatenate((merged_ra, large_ra))
+        merged_dec = np.concatenate((merged_dec, large_dec))
+
+    if len(merged_f_true) == 0:
+        print(f"No data for {band}\n")
+        return None
+
+    print(f"{len(merged_f_true)} sources")
+
+    return merged_f_true, merged_f_xid, merged_f_xid_l, merged_f_xid_u, merged_ra, merged_dec
+
+
+

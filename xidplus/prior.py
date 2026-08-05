@@ -285,7 +285,7 @@ class prior(object):
         self.cut_down_cat(expand_fwhm)
 
     def prior_bkg(self, mu, sigma):
-        """Add background prior. Assumes $B \sim \mathcal{N}(\mu,\sigma^2)$
+        r"""Add background prior. Assumes :math:`B \sim \mathcal{N}(\mu,\sigma^2)`
 
         :param mu: mean
         :param sigma: standard deviation

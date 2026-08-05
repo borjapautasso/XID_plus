@@ -19,10 +19,14 @@ num_chains = int(params[12])
 chain_method = params[13]
 output = True if params[14] == "True" else False
 expand_fwhm = float(params[15])
+stepwise_prior_index = None if params[16] == "None" else int(params[16])
+stepwise_prior_name = None if params[17] == "None" else params[17]
+flux_sampling_space  = params[18]
 
 # Is this a bit overcooked? Helps with the slurm scheduling though
 run_XID_modelling(prior_name, output_name, job_array_num, order, order_large,
                   id_large_tile, flux_prior, flux_stepwise, output_path,
                   cirrus_structure_path, num_samples, num_warmup, num_chains,
-                  chain_method, output, expand_fwhm)
+                  chain_method, output, expand_fwhm, stepwise_prior_index,
+                  stepwise_prior_name, flux_sampling_space)
 

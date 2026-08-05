@@ -33,7 +33,7 @@ def get_fitting_region(order, pixel, padding_order = 11):
     """
     Expand fitting region by a ring of `padding_order` tiles.
     """
-
+    # TODO: This should either be None or -1. 0 is an actual HEALPix order...
     if padding_order == 0:
         moc_tile = MOC()
         moc_tile.add(order, np.array([pixel]))
@@ -45,6 +45,8 @@ def get_fitting_region(order, pixel, padding_order = 11):
     level_diff = padding_order - order
     n_sub = 4**level_diff
 
+
+    # TODO: If i want to give a list of pixels, then this should be changed to not just assume its all within the same pixel
     # Contiguous block of order-11 sub-pixels (nested scheme)
     sub_pixels = np.arange(n_sub * pixel, n_sub * pixel + n_sub)
 

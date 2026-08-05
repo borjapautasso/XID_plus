@@ -62,9 +62,9 @@ for band in bands:
     # mf_kernels.append(np.load("../cirrus/cirrus_pipeline/local_bkg_test_2A_new.npy"))
 
 xid_prior(
-    prior_name = f"euclid_wide_v2.2_order11_7_fwhmandsens",
+    prior_name = f"blind_v2.2_wiener_order11_7_fwhmandsens",
     map_choice = "v2.2",
-    catalogue_choice = "euclid_wide",
+    catalogue_choice = "blind_v2.2_wiener",
     bands = bands,
     order = 11,
     order_large = 7,
