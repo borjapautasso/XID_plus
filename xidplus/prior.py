@@ -316,7 +316,7 @@ class prior(object):
 
         self.prior_flux_upper[~empty] += bkg_term
 
-    def get_pointing_matrix_jax(self, batch_size=1024, pad=2):
+    def get_pointing_matrix(self, batch_size=1024, pad=2):
         """
         Calculate pointing matrix using JAX, restricted to a small window
         around each source (sized to the PRF footprint) instead of every
