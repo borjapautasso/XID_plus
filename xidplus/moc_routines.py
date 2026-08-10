@@ -34,7 +34,7 @@ def get_fitting_region(order, pixel, padding_order = 11):
     Expand fitting region by a ring of `padding_order` tiles.
     """
     # TODO: This should either be None or -1. 0 is an actual HEALPix order...
-    if padding_order == 0:
+    if padding_order == -1:
         moc_tile = MOC()
         moc_tile.add(order, np.array([pixel]))
         return moc_tile

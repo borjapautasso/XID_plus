@@ -332,7 +332,7 @@ def run_XID_modelling(
     
     # Trim map to small tile area + ring
     if expand_fwhm:
-        moc = moc_routines.get_fitting_region(order, id_small_tile, 0)
+        moc = moc_routines.get_fitting_region(order, id_small_tile, -1)
         prior.moc = moc
         prior.cut_down_prior(expand_fwhm)
         print(f"Expanding by {expand_fwhm} * FWHM.")
@@ -702,6 +702,10 @@ def get_catalogue(catalogue_choice):
         cat = Table.from_pandas(cat)
         cat = euclid_mass_cut(cat, "wide_shark")
 
+    elif catalogue_choice == "Herschel_10sqdeg_bright250":
+        cat = Table.read(lustre_path_prima / "sides/outputs/cat/Herschel_10sqdeg_bright250.fits")
+    elif catalogue_choice == "Herschel_10sqdeg_brightish250":
+        cat = Table.read(lustre_path_prima / "sides/outputs/cat/Herschel_10sqdeg_brightish250.fits")
     else:
         raise ValueError("prior_choice not recognised.")
 
@@ -858,6 +862,9 @@ def get_map(map_choice, bands):
     elif map_choice == "v2.2_SV_CBEPixel1.248":
         noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/SV_CBEPixel1.248/noisy/pySIDES_SV_CBEPixel1.248_{band}_noisy_Jy_beam.fits" for band in bands]
         npps = pd.read_csv(lustre_path / "sides/inputs/PRIMAgerv2.2_coadd.txt").query("band in @bands").npp_Jy.tolist()
+    elif map_choice == "HerschelDeep":
+        noisy_maps = [lustre_path / f"prima_data/sides/outputs/maps/HerschelDeep/noisy/pySIDES_HerschelDeep_{band}_noisy_Jy_beam.fits" for band in bands]
+        npps = [0.006996113504272006, 0.005696499857606891, 0.008307884786323006]
 
     else:
         raise ValueError("map_choice not recognised.")
