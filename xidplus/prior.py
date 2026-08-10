@@ -316,174 +316,109 @@ class prior(object):
 
         self.prior_flux_upper[~empty] += bkg_term
 
-    def get_pointing_matrix(self):
+    def get_pointing_matrix_jax(self, batch_size=1024, pad=2):
         """
-        Detects whether GPU is present, and utilises it if so.
-        Otherwise uses CPU.
+        Calculate pointing matrix using JAX, restricted to a small window
+        around each source (sized to the PRF footprint) instead of every
+        pixel in the tile. O(nsrc x window) instead of O(nsrc x snpix).
         """
-
-        # Im not sure gpu is faster if tile is relatively small.
-        # Maybe should check order and take into accoutn, but need testing.
-
-        # Either way if tile is small doubt itll make much difference
-        
-        if jax.default_backend() == "gpu":
-            print("GPU detected, running with GPU.")
-            self.get_pointing_matrix_GPU()
-        else:
-            print("GPU not detected, running with CPU.")
-            self.get_pointing_matrix_CPU()
-
-    def get_pointing_matrix_CPU(self):
-        """
-        Calculate pointing matrix.
-
-        O(nsrc x snpix)? Since both scale equally with tile size O(n^2)?
-        Either way RGI is far far faster than the triangulation previously done.
-
-        This could be parallelised since almost always will have multiple cores.
-        """
-        from scipy.interpolate import RegularGridInterpolator
+        import jax.numpy as jnp
+        from jax import lax
+        from jax.scipy.ndimage import map_coordinates
 
         paxis1, paxis2 = self.prf.shape
-
-        # List + append rather than arrays + np.append(), much faster
-        # Even if the interpolation is easily the most time consuming part
-        amat_row = []
-        amat_col = []
-        amat_data = []
-
-        # ------Deal with PRF array----------
-        centre1 = np.rint((paxis1 - 1.) / 2).astype(int)
-        centre2 = np.rint((paxis2 - 1.) / 2).astype(int)
-
-        # create pointing array
-
-        # TQDM does not work very well with SLURM output, might have to rethink
-        # for s in tqdm(range(self.nsrc), desc = "Calculating pointing matrix", miniters = self.nsrc//20):
-        for s in range(self.nsrc):
-
-            # diff from centre of beam for each pixel in x and y
-            dx = -np.rint(self.sx[s]).astype(int) + self.pindx[centre1] + self.sx_pix
-            dy = -np.rint(self.sy[s]).astype(int) + self.pindy[centre2] + self.sy_pix
-
-            # # diff from each pixel in prf
-            # pindx = self.pindx + self.sx[s] - np.rint(self.sx[s]).astype(int)
-            # pindy = self.pindy + self.sy[s] - np.rint(self.sy[s]).astype(int)
-            # ipx2, ipy2 = np.meshgrid(pindx, pindy)
-
-            # Since SIDES places sources in centre of pixel, use this instead
-            pindx = self.pindx
-            pindy = self.pindy
-
-            good = (dx >= 0) & (dx <= self.pindx[paxis1 - 1]) & (dy >= 0) & (dy <= self.pindy[paxis2 - 1])
-
-            # Switch to RegularGridInterpolator rather than griddata which uses triangulation.
-            # Much much faster, debatable which is 'better' if any.
-            # BTW it expects (y,x)
-            rgi = RegularGridInterpolator(
-                (pindy, pindx),
-                self.prf,
-                method='linear',
-                bounds_error=False,
-                fill_value=0.0
-            )
-
-            atemp = rgi(np.column_stack([dy[good], dx[good]]))
-
-            if atemp.size > 0:
-                keep=atemp > np.max(atemp)/1.0E3
-                amat_data.append(atemp[keep])
-                amat_row.append(np.arange(0, self.snpix, dtype=int)[good][keep])
-                amat_col.append(np.full(keep.sum(), s))
-
-        self.amat_data = np.concatenate(amat_data)
-        self.amat_row = np.concatenate(amat_row)
-        self.amat_col = np.concatenate(amat_col)
-
-    def get_pointing_matrix_GPU(self, batch_size=64, device='cuda'):
-        """
-        AI NEED TO CHECK THIS.
-        I mean it gives the right results and its fast af?
-
-        GPU-accelerated version of get_pointing_matrix using PyTorch.
-
-        Produces amat_row, amat_col, amat_data identical to CPU version.
-        """
-        
-        import torch
-
-        # Move pixel coordinates to GPU
-        sx_pix = torch.tensor(self.sx_pix, device=device, dtype=torch.float32)
-        sy_pix = torch.tensor(self.sy_pix, device=device, dtype=torch.float32)
-        snpix = sx_pix.shape[0]
-
-        # PRF and its pixel scales
-        prf = torch.tensor(self.prf, device=device, dtype=torch.float32)
-        pindx = torch.tensor(self.pindx, device=device, dtype=torch.float32)
-        pindy = torch.tensor(self.pindy, device=device, dtype=torch.float32)
-
-        paxis1, paxis2 = prf.shape
         centre1 = int(round((paxis1 - 1) / 2))
         centre2 = int(round((paxis2 - 1) / 2))
 
+        pindx_np = np.asarray(self.pindx, dtype=np.float64)
+        pindy_np = np.asarray(self.pindy, dtype=np.float64)
+        x0, dxs = float(pindx_np[0]), float(pindx_np[1] - pindx_np[0])
+        y0, dys = float(pindy_np[0]), float(pindy_np[1] - pindy_np[0])
+        x_max, y_max = float(pindx_np[-1]), float(pindy_np[-1])
+
+        # fixed window size (image pixels) that comfortably covers the PRF footprint
+        nwx = int(np.ceil(x_max - x0)) + 1 + 2 * pad
+        nwy = int(np.ceil(y_max - y0)) + 1 + 2 * pad
+
+        # --- build a padded lookup grid: image pixel (y, x) -> row index into
+        # sx_pix/sy_pix/sim, or -1 if that pixel isn't in the cut-down tile ---
+        sx_pix_int = np.rint(self.sx_pix).astype(np.int64)
+        sy_pix_int = np.rint(self.sy_pix).astype(np.int64)
+        x_min, x_max_img = sx_pix_int.min(), sx_pix_int.max()
+        y_min, y_max_img = sy_pix_int.min(), sy_pix_int.max()
+
+        half_x = nwx // 2 + 1
+        half_y = nwy // 2 + 1
+
+        grid_w = (x_max_img - x_min) + 1 + 2 * half_x
+        grid_h = (y_max_img - y_min) + 1 + 2 * half_y
+
+        index_grid_np = np.full((grid_h, grid_w), -1, dtype=np.int32)
+        gx = sx_pix_int - x_min + half_x
+        gy = sy_pix_int - y_min + half_y
+        index_grid_np[gy, gx] = np.arange(self.snpix, dtype=np.int32)
+
+        index_grid = jnp.asarray(index_grid_np)
+        prf = jnp.asarray(self.prf, dtype=jnp.float32)
+        pindx = jnp.asarray(self.pindx, dtype=jnp.float32)
+        pindy = jnp.asarray(self.pindy, dtype=jnp.float32)
+        sx = jnp.asarray(self.sx, dtype=jnp.float32)
+        sy = jnp.asarray(self.sy, dtype=jnp.float32)
+
+        def single_source(sx_s, sy_s):
+            x_img_start = jnp.rint(sx_s).astype(jnp.int32) - nwx // 2
+            y_img_start = jnp.rint(sy_s).astype(jnp.int32) - nwy // 2
+
+            grid_x_start = x_img_start - x_min + half_x
+            grid_y_start = y_img_start - y_min + half_y
+
+            # NB: dynamic_slice clips the start so the slice stays in bounds;
+            # the padding (half_x/half_y) is sized so that never happens for
+            # sources actually inside the cut-down tile.
+            window = lax.dynamic_slice(index_grid, (grid_y_start, grid_x_start), (nwy, nwx))
+
+            local_x = x_img_start + jnp.arange(nwx)
+            local_y = y_img_start + jnp.arange(nwy)
+            xx, yy = jnp.meshgrid(local_x, local_y)
+
+            dx = -jnp.rint(sx_s) + pindx[centre1] + xx
+            dy = -jnp.rint(sy_s) + pindy[centre2] + yy
+
+            good = (dx >= 0) & (dx <= x_max) & (dy >= 0) & (dy <= y_max) & (window >= 0)
+
+            idx_x = (dx - x0) / dxs
+            idx_y = (dy - y0) / dys
+            vals = map_coordinates(prf, [idx_y, idx_x], order=1, mode='constant', cval=0.0)
+
+            return vals, good, window
+
+        batched_fn = jax.jit(jax.vmap(single_source))
+
         amat_row = []
         amat_col = []
         amat_data = []
 
-        # Move source positions to GPU
-        sx = torch.tensor(self.sx, device=device, dtype=torch.float32)
-        sy = torch.tensor(self.sy, device=device, dtype=torch.float32)
-
-
-        # TQDM does not work very well with SLURM output, might have to rethink
-        # for i in tqdm(range(0, self.nsrc, batch_size), desc="GPU pointing matrix", miniters = self.nsrc//20):
         for i in range(0, self.nsrc, batch_size):
-            batch_end = min(i + batch_size, self.nsrc)
-            bs = batch_end - i
+            j = min(i + batch_size, self.nsrc)
+            vals, good, window = batched_fn(sx[i:j], sy[i:j])
+            vals = np.asarray(vals).reshape(j - i, -1)
+            good = np.asarray(good).reshape(j - i, -1)
+            window = np.asarray(window).reshape(j - i, -1)
 
-            # Source positions in batch
-            sx_batch = sx[i:batch_end][:, None]  # bs x 1
-            sy_batch = sy[i:batch_end][:, None]  # bs x 1
+            vals_masked = np.where(good, vals, -np.inf)
+            row_max = vals_masked.max(axis=1)
+            thresh = row_max / 1.0e3
+            keep = good & (vals > thresh[:, None])
 
-            # Compute dx/dy for all map pixels (broadcasted)
-            dx = -torch.round(sx_batch).int() + pindx[centre1] + sx_pix[None, :]  # bs x snpix
-            dy = -torch.round(sy_batch).int() + pindy[centre2] + sy_pix[None, :]  # bs x snpix
+            src_idx, win_idx = np.nonzero(keep)
+            amat_data.append(vals[src_idx, win_idx])
+            amat_row.append(window[src_idx, win_idx])
+            amat_col.append(src_idx + i)
 
-            # Mask pixels outside PRF bounds
-            good = (dx >= 0) & (dx <= pindx[-1]) & (dy >= 0) & (dy <= pindy[-1])
-
-            for b in range(bs):
-                if good[b].any():
-                    # Select valid pixels
-                    dx_valid = dx[b][good[b]].float()
-                    dy_valid = dy[b][good[b]].float()
-
-                    # Normalize for grid_sample: [-1,1]
-                    dx_norm = 2 * dx_valid / (paxis2 - 1) - 1
-                    dy_norm = 2 * dy_valid / (paxis1 - 1) - 1
-
-                    # Prepare coordinates: N x 1 x 1 x 2
-                    coords = torch.stack([dx_norm, dy_norm], dim=-1)[None, :, None, :]
-
-                    # PRF has shape 1 x 1 x H x W
-                    prf_val = torch.nn.functional.grid_sample(
-                        prf[None, None, :, :], coords, mode='bilinear', padding_mode='zeros', align_corners=True
-                    )
-
-                    prf_val = prf_val.flatten()
-
-                    # Threshold tiny values as CPU version does
-                    keep = prf_val > (prf_val.max() / 1e3)
-
-                    amat_data.append(prf_val[keep].cpu().numpy())
-                    amat_row.append(torch.arange(snpix, device=device)[good[b]][keep].cpu().numpy())
-                    amat_col.append(np.full(keep.sum().item(), i+b, dtype=int))
-
-        # Concatenate all batches
         self.amat_data = np.concatenate(amat_data)
-        self.amat_row = np.concatenate(amat_row)
-        self.amat_col = np.concatenate(amat_col)
+        self.amat_row = np.concatenate(amat_row).astype(np.int64)
+        self.amat_col = np.concatenate(amat_col).astype(np.int64)
+
 
 
 class hier_prior(object):
