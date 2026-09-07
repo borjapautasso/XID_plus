@@ -3,11 +3,11 @@
 !xidplus/
 !xidplus/**
 
-!run_model.slurm
-!run_model.py
-!run_prior.slurm
-!run_prior.py
-!xid_functions.py
+!xidpp/
+!xidpp/**
+
 !req.txt
 !setup.py
 !.gitignore
+
+__pycache__/
