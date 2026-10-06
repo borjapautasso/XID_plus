@@ -8,55 +8,8 @@ import warnings
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from xidpp import moc_routines
-from numpy.typing import ArrayLike, NDArray
+from numpy.typing import NDArray
 from pymoc import MOC
-"""
-Only the prior object.
-
-Methods
-init
-create catalogue
-prf
-cuts (map, cat, both)
-pointing
-
-Tracking changes from the main branch (i.e. not the HELP version).
-
-General name changes to make it more readable, alongisde adding docs and comments.
-'Bad' pixels are now masked properly.
-Removed set_moc and set_tile: Redundant, never used, and very simple to replace if/when needed.
-Merged catalogue methods.
-
-Three verbs for the methods.
-Set: User gives something, and it sets the variables/objects.
-        - set_catalogue
-        - set_prf
-        - set_bkg
-
-        (since a map is always the starting point, there isn't strictly a set_map, although it's basically the innit)
-
-Cut: Trim catalogue/map/both for a given MOC.
-        - cut_map
-        - cut_catalogue
-        - cut_prior
-
-Compute: Compute something from the current state of the object. (gen if I want three letters but probs not:/)
-        - compute_pointing_matrix
-        - compute_upper_lims
-
-        
-Potentially simplify the two main functions by adding a few private methods?
-
-i.e. the innit is these tasks:
-- map (including the masking and flattening)
-- moc (should probably stardadise it throughout, i.e. reintroduce set_moc?)
-- fwhm+survey_sens stays as is.
-
-And the catalogue.
-- Set coords
-- Set properties (loops over all the optionals, lots of asserts too hidden away ^^)
-- Set moc (as above :/)
-"""
 
 class Prior():
     """
@@ -65,9 +18,72 @@ class Prior():
     The prior is initialised with the image and noise maps and corresponding WCS information.
     Source catalogue information is added separately via :meth:`set_catalogue`.
 
-    Arguments
-    ---------
+    Attributes
+    ----------
+    map_x, map_y : np.ndarray of int
+        Pixel coordinates of the kept (i.e. unmasked, within MOC) map pixels.
+        Set in ``__init__``, trimmed in ``cut_map``.
+    map_flux, map_noise : np.ndarray of float
+        Flux and noise value of each kept map pixel.
+        Set in ``__init__``, trimmed in ``cut_map``.
+    header : fits.Header
+        FITS header of the map.
+        Set in ``__init__``.
+    moc : pymoc.MOC or None
+        MOC defining area being kept.
+        Set in ``__init__`` and/or ``set_catalogue``.
+    npix : int
+        Number of kept map pixels.
+        Set in ``__init__``, trimmed in ``cut_map``.
+    fwhm : float or None
+        FWHM of the map beam, in arcseconds. Used to expand map and/or catalogue in ``cut_prior``.
+        Set in ``__init__``.
+
+    src_x, src_y : np.ndarray of float
+        Pixel coordinates of the sources.
+        Set in ``set_catalogue``, trimmed in ``cut_catalogue``.
+    src_ra, src_dec : np.ndarray of float
+        Sky coordinates of the sources, in degrees.
+        Set in ``set_catalogue``, trimmed in ``cut_catalogue``.
+    src_id : np.ndarray of int
+        Unique ID of each source.
+        Set in ``set_catalogue``, trimmed in ``cut_catalogue``.
+    nsrc : int
+        Number of sources.
+        Set in ``set_catalogue``, trimmed in ``cut_catalogue``.
+    cat_name : str or None
+        Name of input catalogue.
+        Set in ``set_catalogue``.
+    flux_lower, flux_upper : np.ndarray of float
+        Lower and upper flux limit of each source. Defaults to 0 and 1,000 respectively.
+        Set in ``set_catalogue``, ``flux_upper`` is recomputed in ``compute_upper_lims``.
+    flux_mu, flux_sigma : np.ndarray of float or None
+        Mean and standard deviation of the prior flux information for each source.
+        Set in ``set_catalogue``.
+    z_mu, z_sigma : np.ndarray of float or None
+        Mean and standard deviation of the prior redshift information for each source.
+        Set in ``set_catalogue``.
+
+    prf : np.ndarray of float
+        PRF array.
+        Set in ``set_prf``.
+    prf_x, prf_y : np.ndarray of float
+        x and y axis pixel coordinates of the PRF array.
+        Set in ``set_prf``.
     
+    bkg_mu, bkg_sigma : float
+        Mean and standard deviation of the prior background information.
+        Set in ``set_bkg``.
+
+    amat_data : np.ndarray of float
+        PRF strength of each source/pixel pair in the sparse pointing matrix.
+        Set in ``compute_pointing_matrix``.
+    amat_row : np.ndarray of int
+        Index into the map pixel list (i.e. ``map_x``/``map_y``) of each source/pixel pair.
+        Set in ``compute_pointing_matrix``.
+    amat_col : np.ndarray of int
+        Index into the source list (i.e. ``src_x``/``src_y``) of each source/pixel pair.
+        Set in ``compute_pointing_matrix``.
     """
 
     def __init__(
@@ -77,7 +93,6 @@ class Prior():
         header: fits.Header,
         moc: MOC|None = None,
         fwhm: float|None = None,
-        survey_sens: float|None = None,
         ) -> None:
         """
         Initialise Prior object.
@@ -89,9 +104,9 @@ class Prior():
         
         Parameters
         ----------
-        image : array_like
+        image : np.ndarray
             Image map.
-        noise : array_like
+        noise : np.ndarray
             Noise map.
         header : fits.Header
             FITS Header object associated with image, used to make WCS object.
@@ -99,16 +114,12 @@ class Prior():
             MOC object which defines the area being kept.
         fwhm : float, optional
             FWHM of the map beam, in arcseconds.
-        survey_sens : float, optional
-            1-sigma survey sensitivity, in map intensity units. 
         """
 
         self.header = header
-
         wcs = WCS(self.header)
 
-        # There seems to be some hatred towards using the wcs to get the map dimensions.
-        # Although by construction (for a sensible input map), our wcs.pixel_shape is never None.
+        # Pylance warns that they might be None, but for any reasonable header it's fine...
         x_pix, y_pix = np.meshgrid(np.arange(wcs.pixel_shape[0]), np.arange(wcs.pixel_shape[1]))
 
         self.map_x = x_pix.flatten()
@@ -117,9 +128,11 @@ class Prior():
         self.map_flux = image.flatten()
         self.map_noise = noise.flatten()
 
+        # Mask out any pixels with non-finite values (in either map), or with exactly 0 noise
         bad_mask = ~np.isfinite(self.map_flux) | ~np.isfinite(self.map_noise) | (self.map_noise == 0)
 
         if bad_mask.any():
+            # TODO: Should probably explicitly print saying X many pixels removed
             self.map_x = self.map_x[~bad_mask]
             self.map_y = self.map_y[~bad_mask]
             self.map_flux = self.map_flux[~bad_mask]
@@ -127,14 +140,10 @@ class Prior():
 
         self.npix = self.map_flux.size
 
-        if fwhm is not None:
-            self.fwhm = fwhm
+        self.fwhm = fwhm
 
-        if survey_sens is not None:
-            self.survey_sens = survey_sens
-
-        if moc is not None:
-            self.moc = moc
+        self.moc = moc
+        if self.moc is not None:
             self.cut_map()
 
     def set_catalogue(
@@ -149,39 +158,39 @@ class Prior():
             flux_sigma : NDArray|None= None,
             z_mu: NDArray|None = None,
             z_sigma: NDArray|None = None,
-            moc: MOC|None = None
-        ):
+            moc: MOC|None = None,
+        ) -> None:
         """
         Create prior source catalogue, containing the properties of the sources that XID+ will fit.
 
+        Trims the map to exclude any regions with no sources.
+        The process varies on whether a MOC is supplied or not.
+
         Parameters
         ----------
-
-        
-        Args:
-            ra:
-                Right ascension (ICRF) of sources, in degrees.
-            dec:
-                Declination (ICRF) of sources, in degrees.
-            cat_name:
-                Name of the input catalogue.
-            ID:
-                Unique ID of each source.
-            flux_lower:
-                Lower flux limit of each source. Defaults to 0 mJy.
-            flux_upper:
-                Upper flux limit of each source. Defaults to 1000 mJy.
-            flux_mu:
-                Mean flux of each source. Used when modelling with non-uniform flux priors.
-            flux_sigma:
-                Standard deviation on the flux of each source. Used when modelling with non-uniform
-                flux priors.
-            z_mu:
-                Median redshift of each source. Currently unused? SED?
-            z_sigma:
-                Standard deviation on the redshift of each source.
-            moc:
-                Pymoc MOC object covering the catalogue.
+        ra : np.ndarray
+            Right Ascension (ICRF) of sources, in degrees
+        dec : np.ndarray
+            Declination (ICRF) of sources, in degrees.
+        cat_name : str, optional
+            Name of the input catalogue.
+        src_id : np.ndarray, optional
+            Unique ID of each source.
+        flux_lower : np.ndarray, optional
+            Lower flux limit of each source. Defaults to 0 mJy.
+        flux_upper : np.ndarray, optional
+            Upper flux limit of each source. Defaults to 1000 mJy.
+        flux_mu : np.ndarray, optional
+            Mean flux of each source. Used when modelling with non-uniform flux priors.
+        flux_sigma : np.ndarray, optional
+            Standard deviation on the flux of each source. Used when modelling with non-uniform
+            flux priors.
+        z_mu : np.ndarray, optional
+            Median redshift of each source. Currently unused? SED?
+        z_sigma : np.ndarray, optional
+            Standard deviation on the redshift of each source.
+        moc : pymoc.MOC, optional
+            Pymoc MOC object covering the catalogue.
         """
         # NOTE
         # Potential thigns to assert?
@@ -189,6 +198,13 @@ class Prior():
         # if ID, that they are unique, and that they have same length as ra
         # all others (bar cat_name and moc), that they are same length.
         # if either mu is given, respective sigma must be too.
+
+        # XOR check; if mu is given, so must sigma, and vice versa.
+        if (flux_mu is None) ^ (flux_sigma is None):
+            raise ValueError("Must supply both `flux_mu` and `flux_sigma`, or neither.")
+
+        if (z_mu is None) ^ (z_sigma is None):
+            raise ValueError("Must supply both `z_mu` and `z_sigma`, or neither.")
 
         wcs = WCS(self.header)
 
@@ -219,30 +235,41 @@ class Prior():
         self.flux_lower = flux_lower
         self.flux_upper = flux_upper
 
-        if flux_mu is not None:
-            self.flux_mu = flux_mu
-            self.flux_sigma = flux_sigma
+        self.flux_mu = flux_mu
+        self.flux_sigma = flux_sigma
 
-        if z_mu is not None:
-            self.z_mu = z_mu
-            self.z_sigma = z_sigma
+        self.z_mu = z_mu
+        self.z_sigma = z_sigma
 
-        try:
-            self.moc = self.moc.intersection(cat_moc)
-        except AttributeError:
+        if self.moc is None:
             self.moc = cat_moc
+        else:
+            self.moc = self.moc.intersection(cat_moc)
 
+        # Feels weird to just do this always. Might make it optional
         self.cut_prior()
 
-    def set_prf(self, prf, prf_x, prf_y):
+    def set_prf(self, prf: NDArray, prf_x: NDArray, prf_y: NDArray) -> None:
         """
-        Sets the point response function (PRF) array and coordinate axes.
+        Sets the point response function (PRF) array and its coordinate axes.
 
-        The peak of the PRF must be in its central pixel, and it must be uniformly positioned (i.e. constant spacial distance between pixels)
-        ``prf`` may be given as an oversampled PSF (i.e. with a different pixel scale than the map), though ``prf_x``/``prf_y`` must account for this.
+        The PRF must currently be a square array, with an odd side length, have its peak at the
+        central pixel, and be sampled at the map pixel scale.
 
-        If given at map pixel scale, an n x n ``prf`` would have both ``prf_x`` and ``prf_y`` equivalent to ``np.arange(0, n, 1)``.
-        More generally: ``np.arange(0, n, (prf_pix_scale/map_pix_scale))``.
+        Parameters
+        ----------
+        prf : np.ndarray
+            PRF array.
+        prf_x : np.ndarray
+            x-axis pixel coordinates of PRF grid. 
+        prf_y : np.ndarray
+            y-axis pixel coordinates of PRF grid. 
+
+        Raises
+        ------
+        NotImplementedError
+            If ``prf`` is not square, its peak is not in its central pixel, or if either ``prf_x``
+            or ``prf_y`` are not evenly spaced in map pixels
         """
         # NOTE: Pointing matrix assumes the PSF array is a uniform square in map pixel units
         # i.e. np.diff(prf_{x,y}) == -1 everywhere, and prf.shape[0] == prf.shape[1]
@@ -279,33 +306,43 @@ class Prior():
         # We need to enforce this logic here, downsampling if needed.
         # If the PRF is downsampled compared to the map, probably just raise a chunky error cos wtf
 
-    def set_bkg(self, mu, sigma):
+    def set_bkg(self, mu: float, sigma: float) -> None:
         """
         Set a Gaussian prior on the background (B).
         
         XID+ assumes the background is normally distributed, i.e. ``B ~ N(mu, sigma^2)``.
+        For consistency with the other Prior attributes, this has been split into ``bkg_mu`` and
+        ``bkg_sigma``.
 
-        Args:
-            mu:
-                Mean
-            sigma:
-                Standard deviation
-        
+        Parameters
+        ----------
+        mu : float
+            Mean of background prior.
+        sigma : float
+            Standard deviation of background prior.        
         """
-        # NOTE:
-        # For consistency either this should be split into lower and upper equivalent (i.e. _mu, _sigma), or the flux bounds should also be set as a tuple?
-        # self.bkg = (mu, sigma)
-
         self.bkg_mu = mu
         self.bkg_sigma = sigma
 
-    def cut_map(self, expand_fwhm = False):
+    def cut_map(self, expand_fwhm: bool = False) -> None:
         """
         Cut down prior map to within MOC.
 
         If ``expand_fwhm`` is True, adds a layer of padding of 1 FWHM around the MOC.
+
+        Parameters
+        ----------
+        expand_fwhm : bool, optional
+            If True, also includes map pixels that sit within one FWHM of the MOC.
         """
         wcs = WCS(self.header)
+
+        if self.moc is None:
+            raise ValueError(
+                """
+                self.moc can't be None.
+                It must be set by either `__init__` or `set_catalogue` beforehand.
+                """)
 
         # Get mask of pixels with centres within the MOC
         ra, dec = wcs.wcs_pix2world(self.map_x, self.map_y, 0)
@@ -332,12 +369,24 @@ class Prior():
         self.map_noise = self.map_noise[keep_mask]        
         self.npix = self.map_flux.size
 
-    def cut_catalogue(self, expand_fwhm = False):
+    def cut_catalogue(self, expand_fwhm: bool = False) -> None:
         """
         Cut down prior catalogue to within MOC.
         
         If ``expand_fwhm`` is True, adds a layer of padding of 1 FWHM around every map pixel.
+
+        Parameters
+        ----------
+        expand_fwhm : bool, optional
+            If True, also includes sources that sit within one FWHM of a map pixel.
         """
+        if self.moc is None:
+            raise ValueError(
+                """
+                self.moc can't be None.
+                It must be set by either `__init__` or `set_catalogue` beforehand.
+                """)
+        
         # Get mask of sources within the MOC
         keep_mask = np.array(moc_routines.check_in_moc(self.src_ra, self.src_dec, self.moc))
 
@@ -367,34 +416,57 @@ class Prior():
         self.flux_lower = self.flux_lower[keep_mask]
         self.flux_upper = self.flux_upper[keep_mask]
 
-        try:
+        # Technically the second part is redundant bc of the XOR check but meh
+        if (self.flux_mu is not None) and (self.flux_sigma is not None):
             self.flux_mu = self.flux_mu[keep_mask]
             self.flux_sigma = self.flux_sigma[keep_mask]
-        except AttributeError:
-            pass
 
-        try:
+        if (self.z_mu is not None) and (self.z_sigma is not None):
             self.z_mu = self.z_mu[keep_mask]
             self.z_sigma = self.z_sigma[keep_mask]
-        except AttributeError:
-            pass
 
-    def cut_prior(self, expand_fwhm = False):
+    def cut_prior(self, expand_fwhm: bool = False) -> None:
         """
         Cuts down prior map and catalogue to the prior MOC.
 
         If ``expand_fwhm`` is True, adds a layer of padding of 1 FWHM to the map, and an additional
         one (i.e. a FWHM from the padded map) to the catalogue.
+
+        Parameters
+        ----------
+        expand_fwhm : bool, optional
+            If True, also includes map pixels within one FWHM of the MOC, and sources within one
+            FWHM of the expanded map.
         """
         self.cut_map(expand_fwhm)
         self.cut_catalogue(expand_fwhm)
 
-    def _build_pix_grid(self, values, fill, pad = 0):
+    def _build_pix_grid(self, values: NDArray, fill: int|float, pad: int = 0) -> tuple[NDArray, int, int]:
         """
-        Build pixel grid, where grid[y,x] = fill.
+        Lays out a flattened list into a dense 2D pixel grid.
 
-        Used both in :meth:`compute_upper_lims`, where it recreates the flux map, and in
-        :meth:`compute_pointing_matrix`, where it links a pixel to its pointing matrix row.
+        Creates a (optionally padded) 2D grid, filled with ``fill``.
+        For each map pixel position, replaces the value with the equivalent ``values``.
+
+        Parameters
+        ----------
+        values : array_like
+            Values to place into the grid, one per pixel in ``self.map_x``/``self.map_y``.
+        fill : int or float
+            Value the grid is initialised to. Pixels not covered by ``self.map_x``/``self.map_y``
+            will keep their ``fill`` value.
+        pad : int, optional
+            Extra margin, in map pixels, to add to each side of the grid. Default is 0 (i.e. no
+            padding)
+        
+        Returns
+        -------
+        grid :np.ndarray
+            Dense 2D grid
+        x_origin : int
+            Map x-coordinate corresponding to column 0 of ``grid``.
+        y_origin : int
+            Map y-coordinate corresponding to row 0 of ``grid``.
         """
         x_origin = np.min(self.map_x) - pad
         y_origin = np.min(self.map_y) - pad
@@ -408,21 +480,35 @@ class Prior():
 
         return grid, x_origin, y_origin
 
-    def compute_upper_lims(self, window_size = 5):
+    def compute_upper_lims(self, window_size = 5) -> None:
         """
-        Update flux upper limits (``self.flux_upper``) of each source to an estimate given the map
-        (with some margin via the background parameter).
+        Estimate an upper flux limit for each source from the map and prior background.
 
-        For sources with a non-missing map pixel at their position, sets the upper limit to
-        ``max(D) + |bkg.mu| + 2 * bkg.sigma``, where D is the set of map pixel values in a 5 x 5
-        window centred on the source pixel. Sources whose central pixel is missing (e.g. masked, or
-        outside the tile) keep their exisiting ``flux_upper``.
+        For each source whose central map pixel exists (i.e. not masked, and lies within the kept
+        map), sets the upper limit (``self.flux_upper``) to ``max(D) + |bkg_mu| + 2 * bkg_sigma``, where D is the set of
+        map pixel values in a ``window_size`` x ``window_size`` box centred on the source's pixel.
+        Sources whose central pixel is missing keep their original ``self.flux_upper``.
 
-        In the original method, ``D`` was every pixel value the source contributed to, calculated
-        via the pointing matrix.It also assumed a source's own pixel could never be missing from
-        the map, which is no longer the case.
+        Parameters
+        ----------
+        window_size : int, optional
+            Side length, in map pixels, of the box over which the maximum pixel is computed.
+            Defaults to a 5x5 window.
         """
-        # bkg_term = np.abs(self.bkg[0]) + 2 * self.bkg[1]
+
+        # TODO: This may (will?) cause issues with a less naive map maker. If a source falls in the
+        # corner of a pixel, it will split its total flux over the nearby 4 pixels. Therefore the
+        # maximum number there would not align. Should be able to simply normalise by amat_data,
+        # which is how much that source contributes to any pixel. Would require the pointing matrix
+        # to be computed beforehand, though that was the case in the original method too...
+        
+        # TODO: Instead of a simple pixel padding, might want to consider any pixel within a HWHM
+        # or similar. Though this would break if a source's position was particularly innacurate,
+        # e.g. from astronometry or such, though that is probably a different problem altogether.
+
+        # TODO: Should probably enforce an odd window size. Then again it seems like I may just
+        # remove the window and use fwhm instead?
+
         bkg_term = np.abs(self.bkg_mu) + 2 * self.bkg_sigma
 
         # Build image grid, where value_grid[y,x] is the value of that pixel
@@ -448,7 +534,7 @@ class Prior():
         # For all sources who have a flux value at their pixel, update their upper flux limits
         self.flux_upper[has_centre_pix] = max_vals[has_centre_pix] + bkg_term
         
-    def compute_pointing_matrix(self, pad = 2, chunk = 2000, subpix = True):
+    def compute_pointing_matrix(self, pad: int = 2, chunk: int = 5000, subpix: bool = True) -> None:
         """
         Compute sparse pointing matrix.
 
@@ -484,17 +570,18 @@ class Prior():
            the tile (i.e. with no corresponding map pixel), the brightest pixel in the map isn't
            the beam peak, resulting in the cut keeping more of the wings.
         
-        Args:
-            pad:
-                How many pixels on either side of the window to be added. Provides margin on the
-                PRF cut, alongside the subpixel calculation.
-            chunk:
-                How many sources are processed per batch. For sufficiently large values (>1,000)
-                runtime is independent of it. Too low or too high values may cause performance loss
-                from Python overheads and memory issues respectively.
-            subpix:
-                Whether to treat a source's position to be defined at subpixel accuracy.
-                If false, sources are treated as being in the exact centre of their pixel.
+        Parameters
+        ----------
+        pad : int, optional
+            How many pixels on either side of the window to be added. Provides margin on the PRF
+            cut, alongside the subpixel calculation. Defaults to 2 pixels.
+        chunk : int, optional
+            How many sources are processed per batch. For sufficiently large values (>1,000)
+            runtime is independent of it. Too low or too high values may cause performance loss
+            from Python overheads and memory issues respectively. Defaults to 5,000.
+        subpix : bool, optional
+            Whether to treat a source's position to be defined at subpixel accuracy. If False,
+            sources are treated as being in the exact centre of their pixel. Defaults to True.
         """
         # NOTE 
         # More than likely these two should just be constants but idk
