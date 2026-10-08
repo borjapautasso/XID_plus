@@ -29,7 +29,7 @@ class Prior():
     header : fits.Header
         FITS header of the map.
         Set in ``__init__``.
-    moc : pymoc.MOC or None
+    moc : pymoc.MOC
         MOC defining area being kept.
         Set in ``__init__`` and/or ``set_catalogue``.
     npix : int
@@ -132,7 +132,7 @@ class Prior():
         bad_mask = ~np.isfinite(self.map_flux) | ~np.isfinite(self.map_noise) | (self.map_noise == 0)
 
         if bad_mask.any():
-            # TODO: Should probably explicitly print saying X many pixels removed
+            # TODO: Should probably explicitly print saying X many pixels removed ... should probably start a log :/
             self.map_x = self.map_x[~bad_mask]
             self.map_y = self.map_y[~bad_mask]
             self.map_flux = self.map_flux[~bad_mask]
@@ -141,9 +141,9 @@ class Prior():
         self.npix = self.map_flux.size
 
         self.fwhm = fwhm
-
-        self.moc = moc
-        if self.moc is not None:
+        
+        if moc is not None:
+            self.moc = moc
             self.cut_map()
 
     def set_catalogue(
@@ -191,6 +191,11 @@ class Prior():
             Standard deviation on the redshift of each source.
         moc : pymoc.MOC, optional
             Pymoc MOC object covering the catalogue.
+
+        Raises
+        ------
+        ValueError
+            If, for either `flux` or `z`, only one of `_mu` or `_sigma` is given.
         """
         # NOTE
         # Potential thigns to assert?
@@ -241,10 +246,10 @@ class Prior():
         self.z_mu = z_mu
         self.z_sigma = z_sigma
 
-        if self.moc is None:
-            self.moc = cat_moc
-        else:
+        if hasattr(self, "moc"):
             self.moc = self.moc.intersection(cat_moc)
+        else:
+            self.moc = cat_moc
 
         # Feels weird to just do this always. Might make it optional
         self.cut_prior()
@@ -334,25 +339,35 @@ class Prior():
         ----------
         expand_fwhm : bool, optional
             If True, also includes map pixels that sit within one FWHM of the MOC.
-        """
-        wcs = WCS(self.header)
 
-        if self.moc is None:
-            raise ValueError(
-                """
-                self.moc can't be None.
-                It must be set by either `__init__` or `set_catalogue` beforehand.
-                """)
+        Raises
+        ------
+        RuntimeError
+            If the MOC has not been set.
+        ValueError
+            If `fwhm` is None.
+        """
+
+        if not hasattr(self, "moc"):
+            raise RuntimeError(
+                "MOC has not been set. "
+                "It must be set either at initialisation or in `set_catalogue` beforehand.")
+        
+        wcs = WCS(self.header)
 
         # Get mask of pixels with centres within the MOC
         ra, dec = wcs.wcs_pix2world(self.map_x, self.map_y, 0)
         keep_mask = np.array(moc_routines.check_in_moc(ra, dec, self.moc))
 
         if expand_fwhm:
+            if self.fwhm is None:
+                raise ValueError(
+                    "Cannot expand by FWHM when FWHM is not set. "
+                    "Must initialise Prior with valid `fwhm`.")
+            
             all_pixel_coords = SkyCoord(ra = ra, dec = dec, unit = "deg")
             in_moc_pixel_coords = SkyCoord(ra = ra[keep_mask], dec = dec[keep_mask], unit = "deg")
 
-            # NOTE currently just errors if fwhm undefined 
             # First output of function is those indeces of the all_pixels_coords
             # that have an in_moc_pixel_coord within a FWHM
             idx_all, *_ = search_around_sky(all_pixel_coords, in_moc_pixel_coords, self.fwhm*arcsec)
@@ -379,18 +394,34 @@ class Prior():
         ----------
         expand_fwhm : bool, optional
             If True, also includes sources that sit within one FWHM of a map pixel.
+
+        Raises
+        ------
+        RuntimeError
+            If either the catalogue or the MOC have not been set.
+        ValueError
+            If `fwhm` is None.
         """
-        if self.moc is None:
-            raise ValueError(
-                """
-                self.moc can't be None.
-                It must be set by either `__init__` or `set_catalogue` beforehand.
-                """)
+        if not hasattr(self, "moc"):
+            raise RuntimeError(
+                "MOC has not been set. "
+                "It must be set either at initialisation or in `set_catalogue` beforehand.")
         
+        if not hasattr(self, "src_x"):
+            raise RuntimeError(
+                "Prior catalogue has not been set. "
+                "Set it with `set_catalogue`.")
+
+
         # Get mask of sources within the MOC
         keep_mask = np.array(moc_routines.check_in_moc(self.src_ra, self.src_dec, self.moc))
 
         if expand_fwhm:
+            if self.fwhm is None:
+                raise ValueError(
+                    "Cannot expand by FWHM when FWHM is not set. "
+                    "Must initialise Prior with non-None `fwhm`.")
+
             all_source_coords = SkyCoord(self.src_ra, self.src_dec, unit = "deg")
 
             wcs = WCS(self.header)
@@ -485,29 +516,48 @@ class Prior():
         Estimate an upper flux limit for each source from the map and prior background.
 
         For each source whose central map pixel exists (i.e. not masked, and lies within the kept
-        map), sets the upper limit (``self.flux_upper``) to ``max(D) + |bkg_mu| + 2 * bkg_sigma``, where D is the set of
-        map pixel values in a ``window_size`` x ``window_size`` box centred on the source's pixel.
+        map), sets the upper limit (``flux_upper``) to ``max(D) + |bkg_mu| + 2 * bkg_sigma``, where
+        D is the set of map pixel values in a ``window_size`` x ``window_size`` box centred on the
+        source's pixel.
         Sources whose central pixel is missing keep their original ``self.flux_upper``.
+
+        To account for sources that don't sit exactly on the centre of a pixel, normalises by the
+        source's max PRF response (i.e. the max of ``amat_data``).
+
+        Requires the pointing matrix to be computed beforehand
 
         Parameters
         ----------
         window_size : int, optional
             Side length, in map pixels, of the box over which the maximum pixel is computed.
             Defaults to a 5x5 window.
-        """
 
-        # TODO: This may (will?) cause issues with a less naive map maker. If a source falls in the
-        # corner of a pixel, it will split its total flux over the nearby 4 pixels. Therefore the
-        # maximum number there would not align. Should be able to simply normalise by amat_data,
-        # which is how much that source contributes to any pixel. Would require the pointing matrix
-        # to be computed beforehand, though that was the case in the original method too...
-        
+        Raises
+        ------
+        RuntimeError
+            If either the catalogue, background, or pointing matrix have not been set/computed.
+        """
         # TODO: Instead of a simple pixel padding, might want to consider any pixel within a HWHM
         # or similar. Though this would break if a source's position was particularly innacurate,
         # e.g. from astronometry or such, though that is probably a different problem altogether.
 
         # TODO: Should probably enforce an odd window size. Then again it seems like I may just
         # remove the window and use fwhm instead?
+
+        if not hasattr(self, "src_x"):
+            raise RuntimeError(
+                "Prior catalogue has not been set. "
+                "Call `set_catalogue` before `compute_upper_lims`.")
+
+        if not hasattr(self, "bkg_mu"):
+            raise RuntimeError(
+                "Prior background has not been set. "
+                "Call `set_bkg` before `compute_upper_lims`.")
+        
+        if not hasattr(self, "amat_data"):
+            raise RuntimeError(
+                "Pointing matrix has not been computed. "
+                "Call `compute_pointing_matrix` before `compute_upper_lims`.")
 
         bkg_term = np.abs(self.bkg_mu) + 2 * self.bkg_sigma
 
@@ -531,8 +581,16 @@ class Prior():
         max_vals = np.full(self.nsrc, -np.inf)
         max_vals[within_grid] = max_grid[src_y[within_grid], src_x[within_grid]]
 
-        # For all sources who have a flux value at their pixel, update their upper flux limits
-        self.flux_upper[has_centre_pix] = max_vals[has_centre_pix] + bkg_term
+        # For each source, find the pixel it most contributes to. A source in the corner of a pixel
+        # would have its flux split amongst neighbouring pixels
+        max_prf_response = np.zeros(self.nsrc)
+        np.maximum.at(max_prf_response, self.amat_col, self.amat_data)
+        
+        # For all sources who have a flux value at their pixel and have a significant PRF
+        # contribution, update their upper flux limits
+        update_mask = has_centre_pix & (max_prf_response > 0)
+        
+        self.flux_upper[update_mask] = max_vals[update_mask]/max_prf_response[update_mask] + bkg_term
         
     def compute_pointing_matrix(self, pad: int = 2, chunk: int = 5000, subpix: bool = True) -> None:
         """
@@ -582,7 +640,24 @@ class Prior():
         subpix : bool, optional
             Whether to treat a source's position to be defined at subpixel accuracy. If False,
             sources are treated as being in the exact centre of their pixel. Defaults to True.
+
+        Raises
+        ------
+        RuntimeError
+            If either the catalogue or the PRF have not been set.
+        ValueError
+            If there are no sources within the lookup grid.
         """
+        if not hasattr(self, "src_x"):
+            raise RuntimeError(
+                "Prior catalogue has not been set. "
+                "It must be set with `set_catalogue` beforehand.")
+        
+        if not hasattr(self, "prf"):
+            raise RuntimeError(
+                "PRF has not been set. "
+                "It must be with `set_prf` beforehand.")
+ 
         # NOTE 
         # More than likely these two should just be constants but idk
         # Value at which to trim the PRF. Needs to be larger than `keep_thresh`
