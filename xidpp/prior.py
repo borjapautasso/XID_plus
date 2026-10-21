@@ -8,6 +8,7 @@ import warnings
 import numpy as np
 from numpy.lib.stride_tricks import sliding_window_view
 from xidpp import moc_routines
+from xidpp.misc import build_pix_grid
 from numpy.typing import NDArray
 from pymoc import MOC
 
@@ -26,6 +27,9 @@ class Prior():
     map_flux, map_noise : np.ndarray of float
         Flux and noise value of each kept map pixel.
         Set in ``__init__``, trimmed in ``cut_map``.
+    wcs : astropy.wcs.WCS
+        Astropy WCS object defining the map.
+        Set in ``__init__``.
     header : fits.Header
         FITS header of the map.
         Set in ``__init__``.
@@ -115,12 +119,10 @@ class Prior():
         fwhm : float, optional
             FWHM of the map beam, in arcseconds.
         """
-
         self.header = header
-        wcs = WCS(self.header)
+        self.wcs = WCS(self.header)
 
-        # Pylance warns that they might be None, but for any reasonable header it's fine...
-        x_pix, y_pix = np.meshgrid(np.arange(wcs.pixel_shape[0]), np.arange(wcs.pixel_shape[1]))
+        x_pix, y_pix = np.meshgrid(np.arange(self.wcs.pixel_shape[0]), np.arange(self.wcs.pixel_shape[1]))
 
         self.map_x = x_pix.flatten()
         self.map_y = y_pix.flatten()
@@ -211,9 +213,7 @@ class Prior():
         if (z_mu is None) ^ (z_sigma is None):
             raise ValueError("Must supply both `z_mu` and `z_sigma`, or neither.")
 
-        wcs = WCS(self.header)
-
-        src_x, src_y = wcs.wcs_world2pix(ra, dec, 0)
+        src_x, src_y = self.wcs.wcs_world2pix(ra, dec, 0)
 
         if moc is None:
             cat_moc = moc_routines.create_moc_from_cat(ra, dec)
@@ -224,7 +224,7 @@ class Prior():
         self.src_y = src_y
         self.src_ra = ra
         self.src_dec = dec
-        self.nsrc = self.src_ra.size
+        self.nsrc = self.src_ra.size # Scope to put this as a property (and npix), though I think not needed
         self.cat_name = cat_name
 
         if src_id is None:
@@ -300,12 +300,10 @@ class Prior():
         if np.any(np.abs(np.diff(prf_x)) != 1) or np.any(np.abs(np.diff(prf_y)) != 1):
             raise NotImplementedError("PSF array must be in map pixels.")
 
-
         # NOTE: it would be possible to create the x and y axes ourselves, and just ask for the prf and the prf_pixscale.
         self.prf = prf
         self.prf_x = prf_x
         self.prf_y = prf_y
-
 
         # TODO: Pointing matrix assumes the prf is stored in map pixel coordinates.
         # We need to enforce this logic here, downsampling if needed.
@@ -353,10 +351,8 @@ class Prior():
                 "MOC has not been set. "
                 "It must be set either at initialisation or in `set_catalogue` beforehand.")
         
-        wcs = WCS(self.header)
-
         # Get mask of pixels with centres within the MOC
-        ra, dec = wcs.wcs_pix2world(self.map_x, self.map_y, 0)
+        ra, dec = self.wcs.wcs_pix2world(self.map_x, self.map_y, 0)
         keep_mask = np.array(moc_routines.check_in_moc(ra, dec, self.moc))
 
         if expand_fwhm:
@@ -412,7 +408,6 @@ class Prior():
                 "Prior catalogue has not been set. "
                 "Set it with `set_catalogue`.")
 
-
         # Get mask of sources within the MOC
         keep_mask = np.array(moc_routines.check_in_moc(self.src_ra, self.src_dec, self.moc))
 
@@ -424,8 +419,7 @@ class Prior():
 
             all_source_coords = SkyCoord(self.src_ra, self.src_dec, unit = "deg")
 
-            wcs = WCS(self.header)
-            map_ra, map_dec = wcs.wcs_pix2world(self.map_x, self.map_y, 0)
+            map_ra, map_dec = self.wcs.wcs_pix2world(self.map_x, self.map_y, 0)
             map_pixel_coords = SkyCoord(map_ra, map_dec, unit = "deg")
 
             idx_all, *_ = search_around_sky(all_source_coords, map_pixel_coords, self.fwhm*arcsec)
@@ -471,45 +465,6 @@ class Prior():
         """
         self.cut_map(expand_fwhm)
         self.cut_catalogue(expand_fwhm)
-
-    def _build_pix_grid(self, values: NDArray, fill: int|float, pad: int = 0) -> tuple[NDArray, int, int]:
-        """
-        Lays out a flattened list into a dense 2D pixel grid.
-
-        Creates a (optionally padded) 2D grid, filled with ``fill``.
-        For each map pixel position, replaces the value with the equivalent ``values``.
-
-        Parameters
-        ----------
-        values : array_like
-            Values to place into the grid, one per pixel in ``self.map_x``/``self.map_y``.
-        fill : int or float
-            Value the grid is initialised to. Pixels not covered by ``self.map_x``/``self.map_y``
-            will keep their ``fill`` value.
-        pad : int, optional
-            Extra margin, in map pixels, to add to each side of the grid. Default is 0 (i.e. no
-            padding)
-        
-        Returns
-        -------
-        grid :np.ndarray
-            Dense 2D grid
-        x_origin : int
-            Map x-coordinate corresponding to column 0 of ``grid``.
-        y_origin : int
-            Map y-coordinate corresponding to row 0 of ``grid``.
-        """
-        x_origin = np.min(self.map_x) - pad
-        y_origin = np.min(self.map_y) - pad
-
-        shape = (np.max(self.map_y) - y_origin + pad + 1,
-                 np.max(self.map_x) - x_origin + pad + 1)
-
-        grid = np.full(shape, fill)
-
-        grid[self.map_y - y_origin, self.map_x - x_origin] = values
-
-        return grid, x_origin, y_origin
 
     def compute_upper_lims(self, window_size = 5) -> None:
         """
@@ -562,7 +517,7 @@ class Prior():
         bkg_term = np.abs(self.bkg_mu) + 2 * self.bkg_sigma
 
         # Build image grid, where value_grid[y,x] is the value of that pixel
-        value_grid, x_origin, y_origin = self._build_pix_grid(self.map_flux, fill = -np.inf)
+        value_grid, x_origin, y_origin = build_pix_grid(self.map_x, self.map_y, self.map_flux, fill = -np.inf)
         grid_height, grid_width = value_grid.shape
 
         # Get source pixel position (integer, not sub-pix), relative to grid origin
@@ -699,7 +654,7 @@ class Prior():
         # Pad by a full window, needed for sliding_window_view
         grid_pad = window_nx
 
-        index_grid, x_origin, y_origin = self._build_pix_grid(np.arange(self.npix), -1, grid_pad)
+        index_grid, x_origin, y_origin = build_pix_grid(self.map_x, self.map_y, np.arange(self.npix), -1, grid_pad)
         grid_height, grid_width = index_grid.shape
 
         # This is basically some fancy slicing, which is far quicker than normaly Python slicing
