@@ -119,6 +119,7 @@ class Prior:
         fwhm : float, optional
             FWHM of the map beam, in arcseconds.
         """
+        # TODO: Should make all input functions (i.e. init and all the sets) more robust
         self.header = header
         self.wcs = WCS(self.header)
 
@@ -127,8 +128,8 @@ class Prior:
         self.map_x = x_pix.flatten()
         self.map_y = y_pix.flatten()
 
-        self.map_flux = image.flatten()
-        self.map_noise = noise.flatten()
+        self.map_flux = np.asarray(image, dtype = np.float64).flatten()
+        self.map_noise = np.asarray(noise, dtype = np.float64).flatten()
 
         # Mask out any pixels with non-finite values (in either map), or with exactly 0 noise
         bad_mask = ~np.isfinite(self.map_flux) | ~np.isfinite(self.map_noise) | (self.map_noise == 0)
