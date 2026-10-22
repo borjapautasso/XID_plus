@@ -12,7 +12,8 @@ from xidpp.misc import build_pix_grid
 from numpy.typing import NDArray
 from pymoc import MOC
 
-class Prior():
+
+class Prior:
     """
     Contains the image and prior source information used by XID+.
 
@@ -74,7 +75,7 @@ class Prior():
     prf_x, prf_y : np.ndarray of float
         x and y axis pixel coordinates of the PRF array.
         Set in ``set_prf``.
-    
+
     bkg_mu, bkg_sigma : float
         Mean and standard deviation of the prior background information.
         Set in ``set_bkg``.
@@ -102,10 +103,10 @@ class Prior():
         Initialise Prior object.
 
         Sets up the ``Prior`` object with the map data. Takes both an image (i.e. flux) map, and a
-        noise/error map.        
+        noise/error map.
         Any pixel with a non-finite value (i.e. nan or inf) in either map, or with exactly zero
         noise is treated as unusable, and are masked out.
-        
+
         Parameters
         ----------
         image : np.ndarray
@@ -143,7 +144,7 @@ class Prior():
         self.npix = self.map_flux.size
 
         self.fwhm = fwhm
-        
+
         if moc is not None:
             self.moc = moc
             self.cut_map()
@@ -266,9 +267,9 @@ class Prior():
         prf : np.ndarray
             PRF array.
         prf_x : np.ndarray
-            x-axis pixel coordinates of PRF grid. 
+            x-axis pixel coordinates of PRF grid.
         prf_y : np.ndarray
-            y-axis pixel coordinates of PRF grid. 
+            y-axis pixel coordinates of PRF grid.
 
         Raises
         ------
@@ -287,7 +288,7 @@ class Prior():
         # Equal axes length.
         if prf.shape[0] != prf.shape[1]:
             raise NotImplementedError("PSF must have equal axis lengths.")
-        
+
         # Check array is odd.
         if prf.shape[0] % 2 == 0:
             raise NotImplementedError("PSF array length but have odd length (to have a central pixel)")
@@ -295,7 +296,7 @@ class Prior():
         # Peak is in centre
         if np.nanmax(prf) != prf[prf.shape[0]//2, prf.shape[0]//2]:
             raise NotImplementedError("PSF peak must be in its centre.")
-        
+
         # In map pixels
         if np.any(np.abs(np.diff(prf_x)) != 1) or np.any(np.abs(np.diff(prf_y)) != 1):
             raise NotImplementedError("PSF array must be in map pixels.")
@@ -312,7 +313,7 @@ class Prior():
     def set_bkg(self, mu: float, sigma: float) -> None:
         """
         Set a Gaussian prior on the background (B).
-        
+
         XID+ assumes the background is normally distributed, i.e. ``B ~ N(mu, sigma^2)``.
         For consistency with the other Prior attributes, this has been split into ``bkg_mu`` and
         ``bkg_sigma``.
@@ -322,7 +323,7 @@ class Prior():
         mu : float
             Mean of background prior.
         sigma : float
-            Standard deviation of background prior.        
+            Standard deviation of background prior.
         """
         self.bkg_mu = mu
         self.bkg_sigma = sigma
@@ -345,12 +346,11 @@ class Prior():
         ValueError
             If `fwhm` is None.
         """
-
         if not hasattr(self, "moc"):
             raise RuntimeError(
                 "MOC has not been set. "
                 "It must be set either at initialisation or in `set_catalogue` beforehand.")
-        
+
         # Get mask of pixels with centres within the MOC
         ra, dec = self.wcs.wcs_pix2world(self.map_x, self.map_y, 0)
         keep_mask = np.array(moc_routines.check_in_moc(ra, dec, self.moc))
@@ -360,7 +360,7 @@ class Prior():
                 raise ValueError(
                     "Cannot expand by FWHM when FWHM is not set. "
                     "Must initialise Prior with valid `fwhm`.")
-            
+
             all_pixel_coords = SkyCoord(ra = ra, dec = dec, unit = "deg")
             in_moc_pixel_coords = SkyCoord(ra = ra[keep_mask], dec = dec[keep_mask], unit = "deg")
 
@@ -373,17 +373,17 @@ class Prior():
 
             # Union of those pixels in the moc, and those within a fwhm of an in_moc pix
             keep_mask = keep_mask | fwhm_mask
-        
+
         self.map_x = self.map_x[keep_mask]
         self.map_y = self.map_y[keep_mask]
         self.map_flux = self.map_flux[keep_mask]
-        self.map_noise = self.map_noise[keep_mask]        
+        self.map_noise = self.map_noise[keep_mask]
         self.npix = self.map_flux.size
 
     def cut_catalogue(self, expand_fwhm: bool = False) -> None:
         """
         Cut down prior catalogue to within MOC.
-        
+
         If ``expand_fwhm`` is True, adds a layer of padding of 1 FWHM around every map pixel.
 
         Parameters
@@ -402,7 +402,7 @@ class Prior():
             raise RuntimeError(
                 "MOC has not been set. "
                 "It must be set either at initialisation or in `set_catalogue` beforehand.")
-        
+
         if not hasattr(self, "src_x"):
             raise RuntimeError(
                 "Prior catalogue has not been set. "
@@ -508,7 +508,7 @@ class Prior():
             raise RuntimeError(
                 "Prior background has not been set. "
                 "Call `set_bkg` before `compute_upper_lims`.")
-        
+
         if not hasattr(self, "amat_data"):
             raise RuntimeError(
                 "Pointing matrix has not been computed. "
@@ -524,7 +524,7 @@ class Prior():
         src_x = (np.rint(self.src_x) - x_origin).astype(int)
         src_y = (np.rint(self.src_y) - y_origin).astype(int)
 
-        # Check that the source's pixel exists within the bounds of the map, and that it is not missing 
+        # Check that the source's pixel exists within the bounds of the map, and that it is not missing
         within_grid = (src_x >= 0) & (src_x < grid_width) & (src_y >= 0) & (src_y < grid_height)
 
         has_centre_pix = np.full(self.nsrc, False)
@@ -540,13 +540,13 @@ class Prior():
         # would have its flux split amongst neighbouring pixels
         max_prf_response = np.zeros(self.nsrc)
         np.maximum.at(max_prf_response, self.amat_col, self.amat_data)
-        
+
         # For all sources who have a flux value at their pixel and have a significant PRF
         # contribution, update their upper flux limits
         update_mask = has_centre_pix & (max_prf_response > 0)
-        
+
         self.flux_upper[update_mask] = max_vals[update_mask]/max_prf_response[update_mask] + bkg_term
-        
+
     def compute_pointing_matrix(self, pad: int = 2, chunk: int = 5000, subpix: bool = True) -> None:
         """
         Compute sparse pointing matrix.
@@ -582,7 +582,7 @@ class Prior():
            Original method trimmed based on the maximum pixel within the map. For sources outside
            the tile (i.e. with no corresponding map pixel), the brightest pixel in the map isn't
            the beam peak, resulting in the cut keeping more of the wings.
-        
+
         Parameters
         ----------
         pad : int, optional
@@ -607,13 +607,13 @@ class Prior():
             raise RuntimeError(
                 "Prior catalogue has not been set. "
                 "It must be set with `set_catalogue` beforehand.")
-        
+
         if not hasattr(self, "prf"):
             raise RuntimeError(
                 "PRF has not been set. "
                 "It must be with `set_prf` beforehand.")
- 
-        # NOTE 
+
+        # NOTE
         # More than likely these two should just be constants but idk
         # Value at which to trim the PRF. Needs to be larger than `keep_thresh`
         prf_thresh = 1e-4
@@ -671,7 +671,7 @@ class Prior():
         # window[0,1]:
         # [2,3]
         # [5,6]
-        # etc. The window index specifies the index of the top left of the window 
+        # etc. The window index specifies the index of the top left of the window
         # However window[2,2], or window[0,2], or window[2,0] would not exist, since there is not a full window for them.
         windows = sliding_window_view(index_grid, (window_ny, window_nx))
 
@@ -824,7 +824,7 @@ class Prior():
 
                 amat_data = np.append(amat_data, atemp[keep])
                 amat_row = np.append(amat_row, np.arange(self.npix, dtype = int)[good][keep])
-                amat_col = np.append(amat_col, np.full(keep.sum(), s)) 
+                amat_col = np.append(amat_col, np.full(keep.sum(), s))
 
         self.amat_row = amat_row
         self.amat_col = amat_col
@@ -850,7 +850,7 @@ class Prior():
             prf_y = self.prf_y
 
             good = (dx >= 0) & (dx < self.prf_x[paxis1 - 1]) & (dy >= 0) & (dy < self.prf_y[paxis2 - 1])
-            
+
             rgi = RegularGridInterpolator(
                     (prf_y, prf_x),
                     self.prf,
@@ -858,7 +858,7 @@ class Prior():
                     bounds_error = False,
                     fill_value = 0.
                     )
-            
+
             atemp = rgi(np.column_stack([dy[good], dx[good]]))
 
             if atemp.size > 0:
@@ -1121,7 +1121,7 @@ class Prior():
         Updated version of upper limit calculation.
 
         Much faster than original, but still looks over the entire area a source contributes to.
-        Still needs 
+        Still needs
         """
         self.prior_flux_upper = np.full(self.nsrc, -np.inf)
 

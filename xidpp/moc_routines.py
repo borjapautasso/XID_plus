@@ -22,7 +22,7 @@ def get_healpix_pixels(order: int,
         Declination of sources, in degrees.
     unique : bool, optional
         Whether to return a unique set of HEALPix indeces, or one per source.
-    
+
     Returns
     -------
     np.ndarray of int
@@ -54,6 +54,7 @@ def create_moc_from_cat(ra: ArrayLike, dec: ArrayLike, order:int = 11) -> MOC:
         Declination of sources, in degrees.
     order: int
         HEALPix order of the MOC.
+
     Returns
     -------
     pymoc.MOC
@@ -65,6 +66,7 @@ def create_moc_from_cat(ra: ArrayLike, dec: ArrayLike, order:int = 11) -> MOC:
     moc.add(order, pixels)
 
     return moc
+
 
 def check_in_moc(ra: ArrayLike, dec: ArrayLike, moc: MOC) -> NDArray[np.bool]:
     """
@@ -89,6 +91,7 @@ def check_in_moc(ra: ArrayLike, dec: ArrayLike, moc: MOC) -> NDArray[np.bool]:
     moc_healpix_pixels = np.array(list(moc.flattened()))
 
     return np.isin(source_healpix_pixels, moc_healpix_pixels)
+
 
 def check_sources_in_tile(pixels: ArrayLike,
                           order: int,
@@ -171,7 +174,6 @@ def create_fitting_area(order: int, pixels: ArrayLike, padding_order: int = 11) 
         pixels_moc.add(order, pixels)
 
         return pixels_moc
-
 
     level_diff = padding_order - order
 

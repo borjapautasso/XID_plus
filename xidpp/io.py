@@ -2,8 +2,11 @@ import subprocess
 from os.path import dirname
 import pickle
 
+
+# TODO: SORT OUT DOCSTRINGS OF THIS FILE
 def git_version():
-    """Returns the git version of the module
+    """
+    Returns the git version of the module
     This function returns a string composed of the abbreviated Git hash of the
     module source, followed by the date of the last commit.  If the source has
     some local modifications, “ [with local modifications]” is added to the
@@ -36,9 +39,11 @@ def git_version():
 
     return version
 
+
 def pickle_dump(content, filename):
     with open(f"{filename}.pkl", "wb") as f:
         pickle.dump({**content, "version": git_version()}, f)
+
 
 def picle_load(filename):
     with open(f"{filename}.pkl", "rb") as f:

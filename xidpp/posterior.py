@@ -1,9 +1,10 @@
-import xidpp
+from xidpp.prior import Prior
 import numpy as np
 from numpyro.diagnostics import summary
 from numpyro.infer import MCMC
 
-class Posterior():
+
+class Posterior:
     def __init__(self, samples, rhat, n_eff, divergences, src_id):
         self.samples = samples
         self.rhat = rhat
@@ -12,7 +13,7 @@ class Posterior():
         self.src_id = src_id
 
     @classmethod
-    def from_numpyro(cls, mcmc: MCMC, prior: xidpp.Prior):
+    def from_numpyro(cls, mcmc: MCMC, prior: Prior):
         samples = {k: np.asarray(v) for k, v in mcmc.get_samples(group_by_chain=True).items()}
         stats = summary(samples, group_by_chain=True)
         
@@ -31,7 +32,3 @@ class Posterior():
         # (nchain, nsample, nsrc) -> (nchain * nsample, nsrcsw)
 
         return self.samples[site].reshape(-1, *self.samples[site].shape[2:])
-
-
-
-    
