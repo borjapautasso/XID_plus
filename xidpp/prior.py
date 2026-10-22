@@ -2,7 +2,7 @@ from astropy.coordinates import SkyCoord, search_around_sky
 from astropy.units import arcsec
 from astropy.wcs import WCS
 from astropy.io import fits
-import jax
+import jax # Can remove after removing the old methods
 from scipy.ndimage import maximum_filter
 import warnings
 import numpy as np
@@ -555,7 +555,7 @@ class Prior:
         bkg_term = np.abs(self.bkg_mu) + 2 * self.bkg_sigma
 
         # Build image grid, where value_grid[y,x] is the value of that pixel
-        value_grid, x_origin, y_origin = build_pix_grid(self.map_x, self.map_y, self.map_flux, fill = -np.inf)
+        value_grid, x_origin, y_origin = self.build_pix_grid(self.map_x, self.map_y, self.map_flux, fill = -np.inf)
         grid_height, grid_width = value_grid.shape
 
         # Get source pixel position (integer, not sub-pix), relative to grid origin
@@ -692,7 +692,7 @@ class Prior:
         # Pad by a full window, needed for sliding_window_view
         grid_pad = window_nx
 
-        index_grid, x_origin, y_origin = build_pix_grid(self.map_x, self.map_y, np.arange(self.npix), -1, grid_pad)
+        index_grid, x_origin, y_origin = self.build_pix_grid(self.map_x, self.map_y, np.arange(self.npix), -1, grid_pad)
         grid_height, grid_width = index_grid.shape
 
         # This is basically some fancy slicing, which is far quicker than normaly Python slicing
